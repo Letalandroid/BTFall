@@ -4,7 +4,10 @@
 // Roni Bandini @ronibandini
 
 /* Includes ---------------------------------------------------------------- */
-#include <fallBT_inferencing.h>
+#define __STATIC_FORCEINLINE static inline
+#define __SSAT(ARG1, ARG2) (ARG1)
+
+#include <letalandroid-project-1_inferencing.h>
 #include <Arduino_LSM9DS1.h>
 #include <ArduinoBLE.h>
 
@@ -32,7 +35,7 @@ int mySeconds=0;
 /* Private variables ------------------------------------------------------- */
 static bool debug_nn = true;
 static uint32_t run_inference_every_ms = 2000;
-static rtos::Thread inference_thread(osPriorityLow);
+// static rtos::Thread inference_thread(osPriorityLow);
 static float buffer[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE] = { 0 };
 static float inference_buffer[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE];
 
@@ -84,7 +87,8 @@ void setup()
   // Copy set parameters in the actual advertising packet
   BLE.setAdvertisingData(advData);
 
-    inference_thread.start(mbed::callback(&run_inference_background));
+    // inference_thread.start(mbed::callback(&run_inference_background));
+    run_inference_background();
 }
 
 void lightsShow(){ 
