@@ -1,19 +1,8 @@
-# Worker Fall Detection v0.1
-# Scan BLE advertising, add to sqllite
-# Roni Bandini
-# Aug 2022 Buenos Aires, Argentina
+# Worker Fall Detection v0.2 (BLE modern)
+# Adapted for Raspberry Pi Python 3.13
 
-# sudo apt install bluetooth libbluetooth-dev
-# sudo apt-get install python3-pip
-# pip3 install pybluez
-# sudo apt-get install libbluetooth-dev bluez bluez-hcidump  libboost-python-dev libboost-thread-dev libglib2.0-dev
-# sudo pip3 install gattlib
-# sudo apt-get install bluetooth libbluetooth-dev
-# sudo python3 -m pip install pybluez
-# sudo pip3 install termcolor
-
-
-from bluetooth.ble import DiscoveryService
+import asyncio
+from bleak import BleakScanner
 from termcolor import colored
 import sqlite3 as sl
 import os
@@ -24,76 +13,72 @@ import re
 con = sl.connect('fall.db')
 cursor = con.cursor()
 
-service = DiscoveryService()
+found = 0
+iterations = 0
 
-
-found=0
-iterations=0
-
-# Clearing the Screen
 os.system('clear')
 
-print(colored('Worker Fall Detection v0.1', 'green'))
-print ("Roni Bandini - Argentina - Powered by Edge Impulse")
-print ("")
-
+print(colored('Worker Fall Detection v0.2', 'green'))
+print("Roni Bandini - Argentina - Powered by Edge Impulse")
+print("")
 print("Scanning...")
 
-while True:
-	print("#"+str(iterations))
+async def scan_loop():
+    global found
+    global iterations
 
-	devices = service.discover(2)
+    while True:
 
-	for address, name in devices.items():
+        print("#" + str(iterations))
 
-		if name!='':
-		
-			
-			print( colored("    {}, {}".format(name, address), 'yellow'))
+        devices = await BleakScanner.discover(timeout=2)
 
-			if "Fall" in name:
+        for d in devices:
 
-				found=1
+            name = d.name
+            address = d.address
 
-				print(colored('Fall detected', 'red'))
+            if name:
 
-				# Create a regex pattern to match all special characters in string
-				pattern = r'[' + string.punctuation + ']'
-				# Remove special chars to avoid sql injection -> nameDb = re.sub(pattern, '', name)
+                print(colored(f"    {name}, {address}", 'yellow'))
 
-				nameDb=name
+                if "Fall" in name:
 
-				sql = "SELECT * from FALL WHERE name='"+nameDb+"'"
-				print(sql)
+                    found = 1
+                    print(colored('Fall detected', 'red'))
 
-				cursor.execute(sql)
-				records = cursor.fetchall()
+                    pattern = r'[' + string.punctuation + ']'
+                    nameDb = name
 
-				if  len(records)==0:
-					print('Adding record: '+name)
+                    sql = "SELECT * from FALL WHERE name='" + nameDb + "'"
+                    print(sql)
 
-					fieldArray=name.split("-")
-	
-					sql = "INSERT INTO FALL (name, worker) values ('"+name+"','"+fieldArray[1]+"')"
+                    cursor.execute(sql)
+                    records = cursor.fetchall()
 
-					with con:
-						con.execute(sql)
-					time.sleep(5)
+                    if len(records) == 0:
 
-				else:
-					print(colored('This fall was already in the database', 'green'))
+                        print('Adding record: ' + name)
 
-		if found==0:
-			print ("")
-			print("No falls detected")
+                        fieldArray = name.split("-")
 
-	iterations=iterations+1
+                        sql = "INSERT INTO FALL (name, worker) values ('" + name + "','" + fieldArray[1] + "')"
 
-	time.sleep(1)
+                        with con:
+                            con.execute(sql)
+
+                        await asyncio.sleep(5)
+
+                    else:
+                        print(colored('This fall was already in the database', 'green'))
+
+        if found == 0:
+            print("")
+            print("No falls detected")
+
+        iterations += 1
+
+        await asyncio.sleep(1)
 
 
-
-
-
-
-		
+asyncio.run(scan_loop())
