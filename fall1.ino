@@ -4,11 +4,8 @@
 // Roni Bandini @ronibandini
 
 /* Includes ---------------------------------------------------------------- */
-#define __STATIC_FORCEINLINE static inline
-#define __SSAT(ARG1, ARG2) (ARG1)
-
-#include <letalandroid-project-1_inferencing.h>
-#include <Arduino_LSM9DS1.h>
+#include <fallBT_inferencing.h>
+#include <Arduino_BMI270_BMM150.h>
 #include <ArduinoBLE.h>
 
 BLEService myService("fff0");
@@ -35,7 +32,7 @@ int mySeconds=0;
 /* Private variables ------------------------------------------------------- */
 static bool debug_nn = true;
 static uint32_t run_inference_every_ms = 2000;
-// static rtos::Thread inference_thread(osPriorityLow);
+static rtos::Thread inference_thread(osPriorityLow);
 static float buffer[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE] = { 0 };
 static float inference_buffer[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE];
 
@@ -87,8 +84,10 @@ void setup()
   // Copy set parameters in the actual advertising packet
   BLE.setAdvertisingData(advData);
 
-    // inference_thread.start(mbed::callback(&run_inference_background));
-    run_inference_background();
+  BLE.advertise();
+    Serial.println("BLE advertising started");
+
+    inference_thread.start(mbed::callback(&run_inference_background));
 }
 
 void lightsShow(){ 
@@ -199,13 +198,13 @@ void run_inference_background()
     
         ei_printf("    %s: %.5f\n", result.classification[ix].label, result.classification[ix].value);
 
-        if ((result.classification[ix].label=="Fall") and (result.classification[ix].value>0.7) ){
+        if ((strcmp(result.classification[ix].label, "Fall") == 0) && (result.classification[ix].value > 0.9)) {
             myCounter=myCounter+1;
             advertiseFall("Fall-"+worker+"-"+String(myCounter));   
             lightsRedOn();
         }
 
-        if ((result.classification[ix].label=="Stand") and (result.classification[ix].value>0.7) ){
+        if ((strcmp(result.classification[ix].label, "Stand") == 0) && (result.classification[ix].value > 0.9)) {
             lightsRedOff();
         }
        
