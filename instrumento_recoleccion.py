@@ -16,6 +16,7 @@ Fechas y horas aleatorias, no consecutivas entre filas.
 from __future__ import annotations
 
 import argparse
+import csv
 import random
 import sqlite3
 import time
@@ -475,6 +476,39 @@ def regenerar_todas_las_fichas(path: Path | str = DEFAULT_DB) -> int:
         con.close()
 
 
+def exportar_tablas_csv(
+    path: Path | str = DEFAULT_DB,
+    out_dir: Path | None = None,
+) -> list[Path]:
+    """
+    Escribe un .csv por tabla (UTF-8) en out_dir.
+    Por defecto: carpeta `instrumento_validacion_csv` junto al archivo .db.
+    """
+    path = Path(path)
+    init_instrumento_db(path)
+    if out_dir is None:
+        out_dir = path.parent / "instrumento_validacion_csv"
+    else:
+        out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    con = _connect(path)
+    written: list[Path] = []
+    try:
+        for t in FICHAS:
+            dest = out_dir / f"{t}.csv"
+            cur = con.execute(f"SELECT * FROM {t} ORDER BY n")
+            col_names = [d[0] for d in cur.description]
+            with dest.open("w", newline="", encoding="utf-8") as f:
+                w = csv.writer(f)
+                w.writerow(col_names)
+                w.writerows(cur.fetchall())
+            written.append(dest)
+    finally:
+        con.close()
+    return written
+
+
 def vaciar_todas_las_fichas(path: Path | str = DEFAULT_DB) -> None:
     path = Path(path)
     init_instrumento_db(path)
@@ -515,6 +549,13 @@ def _cli_clear(args: argparse.Namespace) -> None:
     print(f"Fichas vaciadas en {args.db}")
 
 
+def _cli_export_csv(args: argparse.Namespace) -> None:
+    paths = exportar_tablas_csv(args.db, args.out_dir)
+    print(f"Exportados {len(paths)} CSV en: {paths[0].parent}")
+    for p in paths:
+        print(f"  {p.name}")
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description="Instrumento validación — 5 fichas")
     p.add_argument("--db", type=Path, default=DEFAULT_DB)
@@ -523,6 +564,13 @@ def main() -> None:
     sub.add_parser("list", help="Listar todas las tablas")
     sub.add_parser("regenerate", help="Regenerar 5 fichas (filosofía TN>FP, etc.)")
     sub.add_parser("clear", help="Vaciar las 5 fichas")
+    p_exp = sub.add_parser("export-csv", help="Exportar cada tabla a un .csv (UTF-8)")
+    p_exp.add_argument(
+        "--out-dir",
+        type=Path,
+        default=None,
+        help="Carpeta destino (por defecto: instrumento_validacion_csv junto al .db)",
+    )
     args = p.parse_args()
     if args.cmd == "status":
         _cli_status(args)
@@ -532,6 +580,8 @@ def main() -> None:
         _cli_regenerate(args)
     elif args.cmd == "clear":
         _cli_clear(args)
+    elif args.cmd == "export-csv":
+        _cli_export_csv(args)
 
 
 if __name__ == "__main__":
