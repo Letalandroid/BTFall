@@ -509,6 +509,50 @@ def exportar_tablas_csv(
     return written
 
 
+def exportar_tablas_xlsx(
+    path: Path | str = DEFAULT_DB,
+    out_path: Path | None = None,
+) -> Path:
+    """
+    Un solo libro .xlsx: una hoja por tabla (mismo orden que FICHAS).
+    Por defecto: `instrumento_validacion.xlsx` junto al .db.
+    Requiere: pip install openpyxl
+    """
+    try:
+        from openpyxl import Workbook
+    except ImportError as e:
+        raise SystemExit(
+            "Exportar a Excel requiere openpyxl. Instala con: pip install openpyxl"
+        ) from e
+
+    path = Path(path)
+    init_instrumento_db(path)
+    if out_path is None:
+        out_path = path.parent / "instrumento_validacion.xlsx"
+    else:
+        out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    wb = Workbook()
+    wb.remove(wb.active)
+
+    con = _connect(path)
+    try:
+        for t in FICHAS:
+            title = t[:31]
+            ws = wb.create_sheet(title=title)
+            cur = con.execute(f"SELECT * FROM {t} ORDER BY n")
+            col_names = [d[0] for d in cur.description]
+            ws.append(col_names)
+            for row in cur.fetchall():
+                ws.append(list(row))
+    finally:
+        con.close()
+
+    wb.save(out_path)
+    return out_path
+
+
 def vaciar_todas_las_fichas(path: Path | str = DEFAULT_DB) -> None:
     path = Path(path)
     init_instrumento_db(path)
@@ -556,6 +600,11 @@ def _cli_export_csv(args: argparse.Namespace) -> None:
         print(f"  {p.name}")
 
 
+def _cli_export_xlsx(args: argparse.Namespace) -> None:
+    p = exportar_tablas_xlsx(args.db, args.out)
+    print(f"Exportado (una hoja por tabla): {p}")
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description="Instrumento validación — 5 fichas")
     p.add_argument("--db", type=Path, default=DEFAULT_DB)
@@ -564,12 +613,25 @@ def main() -> None:
     sub.add_parser("list", help="Listar todas las tablas")
     sub.add_parser("regenerate", help="Regenerar 5 fichas (filosofía TN>FP, etc.)")
     sub.add_parser("clear", help="Vaciar las 5 fichas")
-    p_exp = sub.add_parser("export-csv", help="Exportar cada tabla a un .csv (UTF-8)")
+    p_exp = sub.add_parser(
+        "export-csv",
+        help="Exportar cada tabla a un .csv distinto (UTF-8)",
+    )
     p_exp.add_argument(
         "--out-dir",
         type=Path,
         default=None,
         help="Carpeta destino (por defecto: instrumento_validacion_csv junto al .db)",
+    )
+    p_xlsx = sub.add_parser(
+        "export-xlsx",
+        help="Exportar todas las tablas a un solo .xlsx (una hoja por tabla)",
+    )
+    p_xlsx.add_argument(
+        "--out",
+        type=Path,
+        default=None,
+        help="Ruta del .xlsx (por defecto: instrumento_validacion.xlsx junto al .db)",
     )
     args = p.parse_args()
     if args.cmd == "status":
@@ -582,6 +644,8 @@ def main() -> None:
         _cli_clear(args)
     elif args.cmd == "export-csv":
         _cli_export_csv(args)
+    elif args.cmd == "export-xlsx":
+        _cli_export_xlsx(args)
 
 
 if __name__ == "__main__":
