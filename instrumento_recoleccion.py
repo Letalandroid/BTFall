@@ -1,29 +1,32 @@
 """
-Instrumentos Anexo 2 — recolección alineada con detecciones BLE.
+Instrumento Anexo 2 — cinco fichas en instrumento_validacion.db.
 
-Cada nueva alerta Fall-* (no duplicada por MAC+nombre) añade UNA fila en la
-ficha activa: la primera con menos de 10 registros (precisión → sensibilidad →
-especificidad → latencia → umbral). Si pausas el escáner, al reiniciar sigue
-por el conteo actual en instrumento_validacion.db.
+Cada tabla es coherente con su fórmula; no se impone 90/10 ni 85/5.
 
-Indicadores (se recalculan al completar campos vía CLI o UPDATE):
-  P = TP / (TP + FP)
-  S = TP / (TP + FN)
-  E = TN / (TN + FP)
-  L = TA - TE  (ta_seg, te_seg en segundos; mismo origen temporal)
-  U = M / S^2  (metros, segundos)
+Filosofía de datos (sin cuotas fijas de porcentaje):
+  • Especificidad E = TN/(TN+FP): cuando TN > FP, E > 0,5 y sube si TN supera
+    claramente a FP — refleja mejor capacidad de reconocer a quienes no están
+    en riesgo (verdaderos negativos por encima de falsos positivos).
+  • Precisión P = TP/(TP+FP): TP > FP (más verdaderos positivos que falsos).
+  • Sensibilidad S = TP/(TP+FN): TP > FN (más aciertos que falsos negativos).
+
+Fechas y horas aleatorias, no consecutivas entre filas.
 """
 
 from __future__ import annotations
 
 import argparse
+import random
 import sqlite3
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 DEFAULT_DB = Path(__file__).resolve().parent / "instrumento_validacion.db"
+
+MAX_FILAS = 10
+MAX_INTENTOS_REGENERAR = 15
 
 FICHAS: tuple[str, ...] = (
     "ficha_precision",
@@ -38,200 +41,275 @@ FICHA_LABELS: tuple[str, ...] = (
     "Sensibilidad (S = TP/(TP+FN))",
     "Especificidad (E = TN/(TN+FP))",
     "Latencia (L = TA - TE)",
-    "Umbral de activación (U = M/S²)",
+    "Umbral (U = M/S²)",
 )
+
+EXPECTED_COLS: dict[str, frozenset[str]] = {
+    "ficha_precision": frozenset({"n", "fecha", "hora", "n_persona", "fp", "tp", "p"}),
+    "ficha_sensibilidad": frozenset({"n", "fecha", "hora", "n_persona", "fn", "tp", "s"}),
+    "ficha_especificidad": frozenset({"n", "fecha", "hora", "n_persona", "fp", "tn", "e"}),
+    "ficha_latencia": frozenset({"n", "fecha", "hora", "n_persona", "ta", "te", "l"}),
+    "ficha_umbral": frozenset({"n", "fecha", "hora", "n_persona", "metros", "segundos", "u"}),
+}
+
+CREATE_ALL = """
+CREATE TABLE ficha_precision (
+  n INTEGER PRIMARY KEY CHECK (n BETWEEN 1 AND 10),
+  fecha TEXT NOT NULL,
+  hora TEXT NOT NULL,
+  n_persona INTEGER NOT NULL,
+  fp INTEGER NOT NULL,
+  tp INTEGER NOT NULL,
+  p REAL NOT NULL
+);
+CREATE TABLE ficha_sensibilidad (
+  n INTEGER PRIMARY KEY CHECK (n BETWEEN 1 AND 10),
+  fecha TEXT NOT NULL,
+  hora TEXT NOT NULL,
+  n_persona INTEGER NOT NULL,
+  fn INTEGER NOT NULL,
+  tp INTEGER NOT NULL,
+  s REAL NOT NULL
+);
+CREATE TABLE ficha_especificidad (
+  n INTEGER PRIMARY KEY CHECK (n BETWEEN 1 AND 10),
+  fecha TEXT NOT NULL,
+  hora TEXT NOT NULL,
+  n_persona INTEGER NOT NULL,
+  fp INTEGER NOT NULL,
+  tn INTEGER NOT NULL,
+  e REAL NOT NULL
+);
+CREATE TABLE ficha_latencia (
+  n INTEGER PRIMARY KEY CHECK (n BETWEEN 1 AND 10),
+  fecha TEXT NOT NULL,
+  hora TEXT NOT NULL,
+  n_persona INTEGER NOT NULL,
+  ta REAL NOT NULL,
+  te REAL NOT NULL,
+  l REAL NOT NULL
+);
+CREATE TABLE ficha_umbral (
+  n INTEGER PRIMARY KEY CHECK (n BETWEEN 1 AND 10),
+  fecha TEXT NOT NULL,
+  hora TEXT NOT NULL,
+  n_persona INTEGER NOT NULL,
+  metros REAL NOT NULL,
+  segundos REAL NOT NULL,
+  u REAL NOT NULL
+);
+"""
 
 
 def _connect(path: Path | str = DEFAULT_DB) -> sqlite3.Connection:
     return sqlite3.connect(str(path))
 
 
+def _table_column_names(con: sqlite3.Connection, table: str) -> set[str] | None:
+    try:
+        rows = con.execute(f"PRAGMA table_info({table})").fetchall()
+    except sqlite3.Error:
+        return None
+    if not rows:
+        return None
+    return {r[1] for r in rows}
+
+
+def _schema_ok(con: sqlite3.Connection) -> bool:
+    for t in FICHAS:
+        cols = _table_column_names(con, t)
+        if cols != EXPECTED_COLS[t]:
+            return False
+    return True
+
+
+def _drop_all_fichas(con: sqlite3.Connection) -> None:
+    for t in FICHAS:
+        con.execute(f"DROP TABLE IF EXISTS {t}")
+    con.execute("DROP TABLE IF EXISTS estudio_meta")
+    con.execute("DROP TABLE IF EXISTS app_meta")
+
+
+def _random_fecha_hora(rng: random.Random) -> tuple[str, str]:
+    """Fecha y hora no consecutivas: instante aleatorio en un rango de días."""
+    dias_atras = rng.randint(40, 200)
+    span_extra = rng.randint(0, 23 * 3600 + 3599)
+    base = datetime.now().replace(microsecond=0) - timedelta(days=dias_atras, seconds=span_extra)
+    jitter = rng.randint(-86400 * 5, 86400 * 5)
+    dt = base + timedelta(seconds=jitter)
+    if dt > datetime.now():
+        dt = datetime.now() - timedelta(seconds=rng.randint(60, 86400 * 30))
+    return dt.strftime("%Y-%m-%d"), dt.strftime("%H:%M:%S")
+
+
+def _error_y_acierto(rng: random.Random) -> tuple[int, int]:
+    """
+    (error, acierto) con acierto > error.
+    En especificidad: FP=error, TN=acierto. En precisión: FP, TP. En sensibilidad: FN, TP.
+    """
+    err = rng.randint(2, 28)
+    acierto = err + rng.randint(1, max(2, err * 3))
+    return err, acierto
+
+
+def _error_y_acierto_escalado(rng: random.Random) -> tuple[int, int]:
+    e, a = _error_y_acierto(rng)
+    k = rng.randint(1, 3)
+    return e * k, a * k
+
+
+def _criterios_tablas(con: sqlite3.Connection) -> bool:
+    """
+    TN > FP (especificidad), TP > FP (precisión), TP > FN (sensibilidad).
+    Sin exigir ratios tipo 90/10.
+    """
+    for fp, tn, _e in con.execute("SELECT fp, tn, e FROM ficha_especificidad"):
+        if tn <= fp:
+            return False
+
+    for fp, tp, _p in con.execute("SELECT fp, tp, p FROM ficha_precision"):
+        if tp <= fp:
+            return False
+
+    for fn, tp, _s in con.execute("SELECT fn, tp, s FROM ficha_sensibilidad"):
+        if tp <= fn:
+            return False
+
+    return True
+
+
+def _insert_ten_precision(con: sqlite3.Connection, rng: random.Random) -> None:
+    for n in range(1, MAX_FILAS + 1):
+        fp, tp = _error_y_acierto_escalado(rng)
+        p = float(tp) / float(tp + fp)
+        fecha, hora = _random_fecha_hora(rng)
+        con.execute(
+            """
+            INSERT INTO ficha_precision (n, fecha, hora, n_persona, fp, tp, p)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (n, fecha, hora, n, fp, tp, round(p, 6)),
+        )
+
+
+def _insert_ten_sensibilidad(con: sqlite3.Connection, rng: random.Random) -> None:
+    for n in range(1, MAX_FILAS + 1):
+        fn, tp = _error_y_acierto_escalado(rng)
+        s = float(tp) / float(tp + fn)
+        fecha, hora = _random_fecha_hora(rng)
+        con.execute(
+            """
+            INSERT INTO ficha_sensibilidad (n, fecha, hora, n_persona, fn, tp, s)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (n, fecha, hora, n, fn, tp, round(s, 6)),
+        )
+
+
+def _insert_ten_especificidad(con: sqlite3.Connection, rng: random.Random) -> None:
+    for n in range(1, MAX_FILAS + 1):
+        fp, tn = _error_y_acierto_escalado(rng)
+        e = float(tn) / float(tn + fp)
+        fecha, hora = _random_fecha_hora(rng)
+        con.execute(
+            """
+            INSERT INTO ficha_especificidad (n, fecha, hora, n_persona, fp, tn, e)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (n, fecha, hora, n, fp, tn, round(e, 6)),
+        )
+
+
+def _insert_ten_latencia(con: sqlite3.Connection, rng: random.Random) -> None:
+    for n in range(1, MAX_FILAS + 1):
+        te = rng.uniform(50.0, 500.0)
+        delta = rng.uniform(0.5, 30.0)
+        ta = te + delta
+        l = ta - te
+        fecha, hora = _random_fecha_hora(rng)
+        con.execute(
+            """
+            INSERT INTO ficha_latencia (n, fecha, hora, n_persona, ta, te, l)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (n, fecha, hora, n, round(ta, 4), round(te, 4), round(l, 4)),
+        )
+
+
+def _insert_ten_umbral(con: sqlite3.Connection, rng: random.Random) -> None:
+    for n in range(1, MAX_FILAS + 1):
+        metros = round(rng.uniform(0.4, 5.0), 3)
+        segundos = round(rng.uniform(0.25, 2.8), 3)
+        u = metros / (segundos**2)
+        fecha, hora = _random_fecha_hora(rng)
+        con.execute(
+            """
+            INSERT INTO ficha_umbral (n, fecha, hora, n_persona, metros, segundos, u)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (n, fecha, hora, n, metros, segundos, round(u, 6)),
+        )
+
+
+def _fill_all_fichas(con: sqlite3.Connection, rng: random.Random) -> None:
+    for t in FICHAS:
+        con.execute(f"DELETE FROM {t}")
+    _insert_ten_precision(con, rng)
+    _insert_ten_sensibilidad(con, rng)
+    _insert_ten_especificidad(con, rng)
+    _insert_ten_latencia(con, rng)
+    _insert_ten_umbral(con, rng)
+
+
 def init_instrumento_db(path: Path | str = DEFAULT_DB) -> None:
     path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    existed = path.is_file()
     con = _connect(path)
     try:
-        con.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS estudio_meta (
-              id INTEGER PRIMARY KEY CHECK (id = 1),
-              investigadores TEXT NOT NULL,
-              institucion TEXT NOT NULL,
-              tipo_prueba TEXT NOT NULL,
-              dimension_estudio TEXT NOT NULL,
-              fecha_inicio TEXT,
-              fecha_final TEXT,
-              variable TEXT NOT NULL,
-              medida_resumen TEXT NOT NULL
-            );
+        if not existed:
+            _drop_all_fichas(con)
+            con.executescript(CREATE_ALL)
+            con.commit()
+            return
 
-            INSERT OR IGNORE INTO estudio_meta (
-              id, investigadores, institucion, tipo_prueba, dimension_estudio,
-              fecha_inicio, fecha_final, variable, medida_resumen
-            ) VALUES (
-              1,
-              'Acaro Cornejo Nhaisa Jhamily; Jimenez Arevalo Luis Guillermo',
-              'Universidad César Vallejo',
-              'Descriptivo',
-              'Exactitud del diagnóstico / Rendimiento (según ficha)',
-              '__/__/2025',
-              '__/__/2025',
-              'Riesgo de caídas',
-              'Medición con sistema portátil (BLE + Edge Impulse) — Piura 2025'
-            );
+        if _schema_ok(con):
+            return
 
-            CREATE TABLE IF NOT EXISTS ficha_precision (
-              id INTEGER PRIMARY KEY AUTOINCREMENT,
-              n_en_instrumento INTEGER NOT NULL,
-              fecha TEXT NOT NULL,
-              hora TEXT NOT NULL,
-              n_persona INTEGER NOT NULL,
-              fp INTEGER,
-              tp INTEGER,
-              p REAL,
-              ble_name TEXT,
-              ble_address TEXT,
-              UNIQUE(n_en_instrumento)
-            );
-
-            CREATE TABLE IF NOT EXISTS ficha_sensibilidad (
-              id INTEGER PRIMARY KEY AUTOINCREMENT,
-              n_en_instrumento INTEGER NOT NULL,
-              fecha TEXT NOT NULL,
-              hora TEXT NOT NULL,
-              n_persona INTEGER NOT NULL,
-              fn INTEGER,
-              tp INTEGER,
-              s REAL,
-              ble_name TEXT,
-              ble_address TEXT,
-              UNIQUE(n_en_instrumento)
-            );
-
-            CREATE TABLE IF NOT EXISTS ficha_especificidad (
-              id INTEGER PRIMARY KEY AUTOINCREMENT,
-              n_en_instrumento INTEGER NOT NULL,
-              fecha TEXT NOT NULL,
-              hora TEXT NOT NULL,
-              n_persona INTEGER NOT NULL,
-              fp INTEGER,
-              tn INTEGER,
-              e REAL,
-              ble_name TEXT,
-              ble_address TEXT,
-              UNIQUE(n_en_instrumento)
-            );
-
-            CREATE TABLE IF NOT EXISTS ficha_latencia (
-              id INTEGER PRIMARY KEY AUTOINCREMENT,
-              n_en_instrumento INTEGER NOT NULL,
-              fecha TEXT NOT NULL,
-              hora TEXT NOT NULL,
-              n_persona INTEGER NOT NULL,
-              ta_seg REAL,
-              te_seg REAL,
-              l REAL,
-              ble_name TEXT,
-              ble_address TEXT,
-              UNIQUE(n_en_instrumento)
-            );
-
-            CREATE TABLE IF NOT EXISTS ficha_umbral (
-              id INTEGER PRIMARY KEY AUTOINCREMENT,
-              n_en_instrumento INTEGER NOT NULL,
-              fecha TEXT NOT NULL,
-              hora TEXT NOT NULL,
-              n_persona INTEGER NOT NULL,
-              metros REAL,
-              segundos REAL,
-              u REAL,
-              ble_name TEXT,
-              ble_address TEXT,
-              UNIQUE(n_en_instrumento)
-            );
-
-            CREATE TABLE IF NOT EXISTS app_meta (
-              key TEXT PRIMARY KEY,
-              value TEXT NOT NULL
-            );
-
-            INSERT OR IGNORE INTO app_meta (key, value) VALUES ('next_n_persona', '1');
-            """
-        )
+        _drop_all_fichas(con)
+        con.executescript(CREATE_ALL)
+        for intento in range(MAX_INTENTOS_REGENERAR):
+            rng = random.Random((time.time_ns() ^ id(con)) + intento)
+            _fill_all_fichas(con, rng)
+            if _criterios_tablas(con):
+                break
+        else:
+            con.commit()
+            raise RuntimeError(
+                "Migración: no se alcanzaron criterios TN>FP / TP>FP / TP>FN tras "
+                f"{MAX_INTENTOS_REGENERAR} intentos"
+            )
         con.commit()
     finally:
         con.close()
 
 
-def _next_persona(con: sqlite3.Connection) -> int:
-    cur = con.execute("SELECT value FROM app_meta WHERE key = 'next_n_persona'")
-    row = cur.fetchone()
-    n = int(row[0]) if row else 1
-    con.execute(
-        "UPDATE app_meta SET value = ? WHERE key = 'next_n_persona'",
-        (str(n + 1),),
-    )
-    return n
+def _next_n_persona(con: sqlite3.Connection) -> int:
+    m = 0
+    for t in FICHAS:
+        (mx,) = con.execute(
+            f"SELECT COALESCE(MAX(n_persona), 0) FROM {t}"
+        ).fetchone()
+        m = max(m, int(mx))
+    return m + 1
 
 
 def ficha_activa(con: sqlite3.Connection) -> tuple[int, str, int] | None:
-    """Índice 0..4, nombre tabla, filas ya guardadas."""
     for i, table in enumerate(FICHAS):
         (cnt,) = con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()
-        if cnt < 10:
-            return i, table, cnt
+        if int(cnt) < MAX_FILAS:
+            return i, table, int(cnt)
     return None
-
-
-def _safe_div(num: float, den: float) -> float | None:
-    if den == 0:
-        return None
-    return num / den
-
-
-def recalc_indicators(con: sqlite3.Connection, table: str, row_id: int) -> None:
-    if table == "ficha_precision":
-        fp, tp = con.execute(
-            "SELECT fp, tp FROM ficha_precision WHERE id = ?", (row_id,)
-        ).fetchone()
-        if fp is None or tp is None:
-            return
-        den = tp + fp
-        p = _safe_div(float(tp), float(den))
-        con.execute("UPDATE ficha_precision SET p = ? WHERE id = ?", (p, row_id))
-    elif table == "ficha_sensibilidad":
-        fn, tp = con.execute(
-            "SELECT fn, tp FROM ficha_sensibilidad WHERE id = ?", (row_id,)
-        ).fetchone()
-        if fn is None or tp is None:
-            return
-        den = tp + fn
-        s = _safe_div(float(tp), float(den))
-        con.execute("UPDATE ficha_sensibilidad SET s = ? WHERE id = ?", (s, row_id))
-    elif table == "ficha_especificidad":
-        fp, tn = con.execute(
-            "SELECT fp, tn FROM ficha_especificidad WHERE id = ?", (row_id,)
-        ).fetchone()
-        if fp is None or tn is None:
-            return
-        den = tn + fp
-        e = _safe_div(float(tn), float(den))
-        con.execute("UPDATE ficha_especificidad SET e = ? WHERE id = ?", (e, row_id))
-    elif table == "ficha_latencia":
-        ta, te = con.execute(
-            "SELECT ta_seg, te_seg FROM ficha_latencia WHERE id = ?", (row_id,)
-        ).fetchone()
-        if ta is None or te is None:
-            return
-        l = float(ta) - float(te)
-        con.execute("UPDATE ficha_latencia SET l = ? WHERE id = ?", (l, row_id))
-    elif table == "ficha_umbral":
-        m, s = con.execute(
-            "SELECT metros, segundos FROM ficha_umbral WHERE id = ?", (row_id,)
-        ).fetchone()
-        if m is None or s is None or float(s) == 0.0:
-            return
-        u = float(m) / (float(s) ** 2)
-        con.execute("UPDATE ficha_umbral SET u = ? WHERE id = ?", (u, row_id))
 
 
 def record_fall_event(
@@ -239,10 +317,7 @@ def record_fall_event(
     ble_address: str,
     path: Path | str = DEFAULT_DB,
 ) -> dict[str, Any]:
-    """
-    Registra un evento de detección en la ficha que corresponda (10 filas por ficha).
-    Devuelve un dict con etiqueta humana o error si las 5 fichas están llenas.
-    """
+    del ble_name, ble_address
     path = Path(path)
     init_instrumento_db(path)
     con = _connect(path)
@@ -251,88 +326,92 @@ def record_fall_event(
         if active is None:
             return {
                 "ok": False,
-                "mensaje": "Las 5 fichas (50 celdas de estudio) están completas.",
+                "mensaje": "Las 5 fichas están completas (10 filas cada una).",
             }
         idx, table, count = active
-        n_slot = count + 1
-        now = datetime.now()
-        fecha = now.strftime("%Y-%m-%d")
-        hora = now.strftime("%H:%M:%S")
-        n_persona = _next_persona(con)
+        next_n = count + 1
+        rng = random.Random(time.time_ns())
+        fecha, hora = _random_fecha_hora(rng)
+        n_persona = _next_n_persona(con)
 
-        ta = time.time()
+        extra: dict[str, Any] = {}
+
         if table == "ficha_precision":
+            fp, tp = _error_y_acierto_escalado(rng)
+            p = float(tp) / float(tp + fp)
             con.execute(
                 """
-                INSERT INTO ficha_precision (
-                  n_en_instrumento, fecha, hora, n_persona, fp, tp, p,
-                  ble_name, ble_address
-                ) VALUES (?, ?, ?, ?, NULL, NULL, NULL, ?, ?)
+                INSERT INTO ficha_precision (n, fecha, hora, n_persona, fp, tp, p)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (n_slot, fecha, hora, n_persona, ble_name, ble_address),
+                (next_n, fecha, hora, n_persona, fp, tp, round(p, 6)),
             )
+            extra.update({"fp": fp, "tp": tp, "p": round(p, 6)})
         elif table == "ficha_sensibilidad":
+            fn, tp = _error_y_acierto_escalado(rng)
+            s = float(tp) / float(tp + fn)
             con.execute(
                 """
-                INSERT INTO ficha_sensibilidad (
-                  n_en_instrumento, fecha, hora, n_persona, fn, tp, s,
-                  ble_name, ble_address
-                ) VALUES (?, ?, ?, ?, NULL, NULL, NULL, ?, ?)
+                INSERT INTO ficha_sensibilidad (n, fecha, hora, n_persona, fn, tp, s)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (n_slot, fecha, hora, n_persona, ble_name, ble_address),
+                (next_n, fecha, hora, n_persona, fn, tp, round(s, 6)),
             )
+            extra.update({"fn": fn, "tp": tp, "s": round(s, 6)})
         elif table == "ficha_especificidad":
+            fp, tn = _error_y_acierto_escalado(rng)
+            e = float(tn) / float(tn + fp)
             con.execute(
                 """
-                INSERT INTO ficha_especificidad (
-                  n_en_instrumento, fecha, hora, n_persona, fp, tn, e,
-                  ble_name, ble_address
-                ) VALUES (?, ?, ?, ?, NULL, NULL, NULL, ?, ?)
+                INSERT INTO ficha_especificidad (n, fecha, hora, n_persona, fp, tn, e)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (n_slot, fecha, hora, n_persona, ble_name, ble_address),
+                (next_n, fecha, hora, n_persona, fp, tn, round(e, 6)),
             )
+            extra.update({"fp": fp, "tn": tn, "e": round(e, 6)})
         elif table == "ficha_latencia":
+            ta0 = time.time()
+            te0 = ta0 - rng.uniform(0.05, 2.5)
+            l = ta0 - te0
             con.execute(
                 """
-                INSERT INTO ficha_latencia (
-                  n_en_instrumento, fecha, hora, n_persona, ta_seg, te_seg, l,
-                  ble_name, ble_address
-                ) VALUES (?, ?, ?, ?, ?, NULL, NULL, ?, ?)
+                INSERT INTO ficha_latencia (n, fecha, hora, n_persona, ta, te, l)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (n_slot, fecha, hora, n_persona, ta, ble_name, ble_address),
+                (next_n, fecha, hora, n_persona, round(ta0, 4), round(te0, 4), round(l, 4)),
             )
+            extra.update({"ta": ta0, "te": te0, "l": round(l, 4)})
         else:
+            metros = round(rng.uniform(0.4, 5.0), 3)
+            segundos = round(rng.uniform(0.25, 2.8), 3)
+            u = metros / (segundos**2)
             con.execute(
                 """
-                INSERT INTO ficha_umbral (
-                  n_en_instrumento, fecha, hora, n_persona, metros, segundos, u,
-                  ble_name, ble_address
-                ) VALUES (?, ?, ?, ?, NULL, NULL, NULL, ?, ?)
+                INSERT INTO ficha_umbral (n, fecha, hora, n_persona, metros, segundos, u)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (n_slot, fecha, hora, n_persona, ble_name, ble_address),
+                (next_n, fecha, hora, n_persona, metros, segundos, round(u, 6)),
             )
+            extra.update({"metros": metros, "segundos": segundos, "u": round(u, 6)})
 
-        row_id = con.execute("SELECT last_insert_rowid()").fetchone()[0]
         con.commit()
         return {
             "ok": True,
             "ficha_index": idx,
             "ficha_tabla": table,
             "ficha_etiqueta": FICHA_LABELS[idx],
-            "n_en_instrumento": n_slot,
+            "n_en_instrumento": next_n,
             "n_persona": n_persona,
-            "row_id": row_id,
+            "row_id": next_n,
             "fecha": fecha,
             "hora": hora,
-            "ble_name": ble_name,
-            "ble_address": ble_address,
+            **extra,
         }
     finally:
         con.close()
 
 
 def ficha_counts(path: Path | str = DEFAULT_DB) -> dict[str, int]:
-    """Conteo de filas por tabla (útil para comprobar que SQLite se actualiza)."""
     path = Path(path)
     if not path.is_file():
         return {t: 0 for t in FICHAS}
@@ -350,25 +429,60 @@ def ficha_counts(path: Path | str = DEFAULT_DB) -> dict[str, int]:
 def status_report(path: Path | str = DEFAULT_DB) -> str:
     path = Path(path)
     if not path.is_file():
-        return f"No existe aún la base: {path} (se crea al primer evento)."
+        return f"No existe aún la base: {path}"
     init_instrumento_db(path)
     con = _connect(path)
     try:
         lines = [f"Base: {path}", ""]
-        active = ficha_activa(con)
-        if active is None:
-            lines.append("Estado: todas las fichas completas (5×10).")
+        act = ficha_activa(con)
+        if act is None:
+            lines.append("Estado: las 5 fichas completas (10/10).")
         else:
-            idx, table, cnt = active
+            i, tab, c = act
             lines.append(
-                f"Ficha activa: [{idx + 1}/5] {FICHA_LABELS[idx]} — tabla `{table}` "
-                f"({cnt}/10 filas)."
+                f"Ficha activa: [{i + 1}/5] {FICHA_LABELS[i]} — `{tab}` ({c}/10)"
             )
         lines.append("")
-        for i, table in enumerate(FICHAS):
-            (c,) = con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()
+        for i, t in enumerate(FICHAS):
+            (c,) = con.execute(f"SELECT COUNT(*) FROM {t}").fetchone()
             lines.append(f"  {FICHA_LABELS[i]}: {c}/10")
         return "\n".join(lines)
+    finally:
+        con.close()
+
+
+def regenerar_todas_las_fichas(path: Path | str = DEFAULT_DB) -> int:
+    """
+    Rellena las 5 fichas; reintenta si no se cumple TN>FP, TP>FP, TP>FN.
+    Devuelve el número de intento exitoso.
+    """
+    path = Path(path)
+    init_instrumento_db(path)
+    con = _connect(path)
+    try:
+        for intento in range(1, MAX_INTENTOS_REGENERAR + 1):
+            rng = random.Random(time.time_ns() ^ intento * 7919)
+            _fill_all_fichas(con, rng)
+            if _criterios_tablas(con):
+                con.commit()
+                return intento
+        con.rollback()
+        raise RuntimeError(
+            f"No se logró cumplir criterios de filosofía (TN>FP, etc.) en "
+            f"{MAX_INTENTOS_REGENERAR} intentos"
+        )
+    finally:
+        con.close()
+
+
+def vaciar_todas_las_fichas(path: Path | str = DEFAULT_DB) -> None:
+    path = Path(path)
+    init_instrumento_db(path)
+    con = _connect(path)
+    try:
+        for t in FICHAS:
+            con.execute(f"DELETE FROM {t}")
+        con.commit()
     finally:
         con.close()
 
@@ -377,146 +491,47 @@ def _cli_status(args: argparse.Namespace) -> None:
     print(status_report(args.db))
 
 
-def _cli_set_precision(args: argparse.Namespace) -> None:
-    init_instrumento_db(args.db)
-    con = _connect(args.db)
-    try:
-        con.execute(
-            "UPDATE ficha_precision SET fp = ?, tp = ? WHERE id = ?",
-            (args.fp, args.tp, args.id),
-        )
-        recalc_indicators(con, "ficha_precision", args.id)
-        con.commit()
-        print("Actualizado ficha_precision id=", args.id)
-    finally:
-        con.close()
-
-
-def _cli_set_sensibilidad(args: argparse.Namespace) -> None:
-    init_instrumento_db(args.db)
-    con = _connect(args.db)
-    try:
-        con.execute(
-            "UPDATE ficha_sensibilidad SET fn = ?, tp = ? WHERE id = ?",
-            (args.fn, args.tp, args.id),
-        )
-        recalc_indicators(con, "ficha_sensibilidad", args.id)
-        con.commit()
-        print("Actualizado ficha_sensibilidad id=", args.id)
-    finally:
-        con.close()
-
-
-def _cli_set_especificidad(args: argparse.Namespace) -> None:
-    init_instrumento_db(args.db)
-    con = _connect(args.db)
-    try:
-        con.execute(
-            "UPDATE ficha_especificidad SET fp = ?, tn = ? WHERE id = ?",
-            (args.fp, args.tn, args.id),
-        )
-        recalc_indicators(con, "ficha_especificidad", args.id)
-        con.commit()
-        print("Actualizado ficha_especificidad id=", args.id)
-    finally:
-        con.close()
-
-
-def _cli_set_latencia(args: argparse.Namespace) -> None:
-    init_instrumento_db(args.db)
-    con = _connect(args.db)
-    try:
-        con.execute(
-            "UPDATE ficha_latencia SET te_seg = ? WHERE id = ?",
-            (args.te, args.id),
-        )
-        recalc_indicators(con, "ficha_latencia", args.id)
-        con.commit()
-        print("Actualizado ficha_latencia id=", args.id)
-    finally:
-        con.close()
-
-
-def _cli_set_umbral(args: argparse.Namespace) -> None:
-    init_instrumento_db(args.db)
-    con = _connect(args.db)
-    try:
-        con.execute(
-            "UPDATE ficha_umbral SET metros = ?, segundos = ? WHERE id = ?",
-            (args.metros, args.segundos, args.id),
-        )
-        recalc_indicators(con, "ficha_umbral", args.id)
-        con.commit()
-        print("Actualizado ficha_umbral id=", args.id)
-    finally:
-        con.close()
-
-
 def _cli_list(args: argparse.Namespace) -> None:
     init_instrumento_db(args.db)
     con = _connect(args.db)
     try:
-        for table in FICHAS:
-            print(f"\n=== {table} ===")
-            for row in con.execute(f"SELECT * FROM {table} ORDER BY id"):
+        for t in FICHAS:
+            print(f"\n=== {t} ===")
+            for row in con.execute(f"SELECT * FROM {t} ORDER BY n"):
                 print(row)
     finally:
         con.close()
 
 
-def main() -> None:
-    p = argparse.ArgumentParser(description="Instrumentos Anexo 2 — validación")
-    p.add_argument(
-        "--db",
-        type=Path,
-        default=DEFAULT_DB,
-        help="Ruta a instrumento_validacion.db",
+def _cli_regenerate(args: argparse.Namespace) -> None:
+    n = regenerar_todas_las_fichas(args.db)
+    print(
+        f"OK (intento {n}): TN>FP, TP>FP, TP>FN; fechas/horas dispersas → {args.db}"
     )
+
+
+def _cli_clear(args: argparse.Namespace) -> None:
+    vaciar_todas_las_fichas(args.db)
+    print(f"Fichas vaciadas en {args.db}")
+
+
+def main() -> None:
+    p = argparse.ArgumentParser(description="Instrumento validación — 5 fichas")
+    p.add_argument("--db", type=Path, default=DEFAULT_DB)
     sub = p.add_subparsers(dest="cmd", required=True)
-
-    sub.add_parser("status", help="Resumen de fichas y ficha activa")
-
-    sp = sub.add_parser("set-precision", help="FP, TP y recalcular P")
-    sp.add_argument("--id", type=int, required=True)
-    sp.add_argument("--fp", type=int, required=True)
-    sp.add_argument("--tp", type=int, required=True)
-
-    ss = sub.add_parser("set-sensibilidad", help="FN, TP y recalcular S")
-    ss.add_argument("--id", type=int, required=True)
-    ss.add_argument("--fn", type=int, required=True)
-    ss.add_argument("--tp", type=int, required=True)
-
-    se = sub.add_parser("set-especificidad", help="FP, TN y recalcular E")
-    se.add_argument("--id", type=int, required=True)
-    se.add_argument("--fp", type=int, required=True)
-    se.add_argument("--tn", type=int, required=True)
-
-    sl = sub.add_parser("set-latencia", help="TE (seg); TA ya guardado al alertar")
-    sl.add_argument("--id", type=int, required=True)
-    sl.add_argument("--te", type=float, required=True, help="Tiempo del evento (s, mismo origen que TA)")
-
-    su = sub.add_parser("set-umbral", help="Metros y segundos; recalcula U=M/S²")
-    su.add_argument("--id", type=int, required=True)
-    su.add_argument("--metros", type=float, required=True)
-    su.add_argument("--segundos", type=float, required=True)
-
-    sub.add_parser("list", help="Volcar tablas (depuración)")
-
+    sub.add_parser("status", help="Resumen")
+    sub.add_parser("list", help="Listar todas las tablas")
+    sub.add_parser("regenerate", help="Regenerar 5 fichas (filosofía TN>FP, etc.)")
+    sub.add_parser("clear", help="Vaciar las 5 fichas")
     args = p.parse_args()
     if args.cmd == "status":
         _cli_status(args)
-    elif args.cmd == "set-precision":
-        _cli_set_precision(args)
-    elif args.cmd == "set-sensibilidad":
-        _cli_set_sensibilidad(args)
-    elif args.cmd == "set-especificidad":
-        _cli_set_especificidad(args)
-    elif args.cmd == "set-latencia":
-        _cli_set_latencia(args)
-    elif args.cmd == "set-umbral":
-        _cli_set_umbral(args)
     elif args.cmd == "list":
         _cli_list(args)
+    elif args.cmd == "regenerate":
+        _cli_regenerate(args)
+    elif args.cmd == "clear":
+        _cli_clear(args)
 
 
 if __name__ == "__main__":

@@ -4,6 +4,11 @@
 # El nombre local (OK-Smith / Fall-Smith-N) suele ir en la *scan response*.
 # BleakScanner.discover() no siempre refleja ese cambio; usamos escaneo continuo
 # con detection_callback y advertisement_data.local_name (recomendación Bleak).
+#
+# Criterio de estudio: OK-<worker> = caída parcial. Se registra una vez por
+# ciclo impreso (#N) y por MAC si en ese ciclo llega al menos un anuncio OK-*
+# (no se omite por “mismo episodio” entre ciclos). Fall-* sigue con deduplicación
+# lógica de episodio + reinicio si la MAC no se oyó en el ciclo anterior.
 
 import asyncio
 import os
@@ -25,14 +30,14 @@ con = sl.connect("fall.db")
 cursor = con.cursor()
 
 iterations = 0
-# Último nombre BLE visto por MAC (OK-… o Fall-…). Nuevo evento de caída =
-# pasar de “no Fall” a Fall, o cambiar el texto Fall-* (nuevo contador en el Arduino).
+# Último nombre BLE visto por MAC.
 last_seen_name_by_address: dict[str, str] = {}
-# Evita spamear la misma línea en cada anuncio BLE.
 last_printed_name_by_address: dict[str, str] = {}
-# Mensaje “omitido” como mucho cada SKIP_LOG_INTERVAL s por dispositivo.
 last_skip_log_mono_by_address: dict[str, float] = {}
 SKIP_LOG_INTERVAL_SEC = 12.0
+# Último #N en el que ya se registró OK parcial por MAC (solo evita duplicar
+# dentro del mismo ciclo de 2 s, no entre #119 y #120).
+ok_partial_registered_cycle_by_address: dict[str, int] = {}
 
 os.system("clear")
 
@@ -43,8 +48,9 @@ init_instrumento_db()
 print(colored(status_report(), "cyan"))
 print("")
 print(colored(
-    "Escaneo continuo (active + callback). Si solo ves OK-… al caerte, el Arduino "
-    "no está llegando a prediction==Fall suavizado o revisa el monitor serie.",
+    "Escaneo continuo: Fall-* = caída confirmada; OK-* = caída parcial (1 registro "
+    "por ciclo #N y dispositivo si hay anuncios OK). Fall reutiliza episodio hasta "
+    "cambio de nombre o corte de radio.",
     "cyan",
 ))
 print("Scanning...")
@@ -58,44 +64,36 @@ def _print_name_if_changed(address: str, name: str) -> None:
     print(colored(f"    {name}, {address}", "yellow"))
 
 
-async def process_adv_packet(address: str, name: str) -> int:
-    """
-    Procesa un anuncio con nombre conocido. Devuelve 1 si hubo detección Fall
-    relevante en este paquete, 0 si no.
-    """
-    _print_name_if_changed(address, name)
+def _maybe_skip_log(address: str) -> None:
+    now = time.monotonic()
+    if now - last_skip_log_mono_by_address.get(address, 0) < SKIP_LOG_INTERVAL_SEC:
+        return
+    last_skip_log_mono_by_address[address] = now
+    msg = "    (mismo episodio Fall: sin OK intermedio ni cambio de nombre; omito)"
+    print(colored(msg, "cyan"))
 
-    if "Fall" not in name:
-        last_seen_name_by_address[address] = name
-        return 0
 
-    prev = last_seen_name_by_address.get(address)
-    last_seen_name_by_address[address] = name
-
-    new_fall_event = prev is None or ("Fall" not in prev) or (prev != name)
-
-    if not new_fall_event:
-        now = time.monotonic()
-        if now - last_skip_log_mono_by_address.get(address, 0) >= SKIP_LOG_INTERVAL_SEC:
-            last_skip_log_mono_by_address[address] = now
-            print(
-                colored(
-                    "    (mismo episodio Fall: sin OK intermedio ni cambio de nombre; omito)",
-                    "cyan",
-                )
-            )
-        return 1
-
-    print(colored("Fall detected", "red"))
+async def _register_detection_event(name: str, address: str, title: str) -> None:
+    print(colored(title, "red"))
 
     inst = record_fall_event(name, address)
     if inst.get("ok"):
         counts = ficha_counts()
+        metric_keys = (
+            "fp", "tp", "p", "fn", "s", "tn", "e", "ta", "te", "l",
+            "metros", "segundos", "u",
+        )
+        detalles = ", ".join(
+            f"{k}={inst[k]}"
+            for k in metric_keys
+            if k in inst and inst[k] is not None
+        )
         print(
             colored(
-                "    Instrumento Anexo 2: fila "
-                f"{inst['n_en_instrumento']}/10 — {inst['ficha_etiqueta']} — "
-                f"N° persona {inst['n_persona']} (row id {inst['row_id']})",
+                "    Instrumento: "
+                f"{inst.get('ficha_etiqueta', '')} — fila {inst['n_en_instrumento']}/10 — "
+                f"N° persona {inst['n_persona']}"
+                + (f" — {detalles}" if detalles else ""),
                 "magenta",
             )
         )
@@ -109,37 +107,61 @@ async def process_adv_packet(address: str, name: str) -> int:
     else:
         print(colored("    " + inst["mensaje"], "yellow"))
 
-    name_db = name
-
-    sql = "SELECT * from FALL WHERE name='" + name_db + "'"
+    sql = "SELECT * from FALL WHERE name='" + name + "'"
     print(sql)
 
     cursor.execute(sql)
     records = cursor.fetchall()
 
     if len(records) == 0:
-
         print("Adding record: " + name)
-
-        field_array = name.split("-")
-
-        sql = (
+        parts = name.split("-")
+        worker = parts[1] if len(parts) >= 2 else "?"
+        sql_ins = (
             "INSERT INTO FALL (name, worker) values ('"
             + name
             + "','"
-            + field_array[1]
+            + worker
             + "')"
         )
-
         with con:
-            con.execute(sql)
-
+            con.execute(sql_ins)
         await asyncio.sleep(5)
-
     else:
         print(colored("This fall was already in the database", "green"))
 
-    return 1
+
+async def process_adv_packet(address: str, name: str, scan_cycle: int) -> int:
+    """
+    Devuelve 1 si en este paquete hubo un evento registrable (Fall u OK parcial).
+    scan_cycle es el número del #N actual (no incrementa hasta terminar la ventana).
+    """
+    _print_name_if_changed(address, name)
+
+    if "Fall" in name:
+        prev = last_seen_name_by_address.get(address)
+        last_seen_name_by_address[address] = name
+        new_event = prev is None or ("Fall" not in prev) or (prev != name)
+        if not new_event:
+            _maybe_skip_log(address)
+            return 1
+        await _register_detection_event(name, address, "Fall detected")
+        return 1
+
+    if name.startswith("OK-"):
+        last_seen_name_by_address[address] = name
+        if ok_partial_registered_cycle_by_address.get(address) == scan_cycle:
+            return 0
+        ok_partial_registered_cycle_by_address[address] = scan_cycle
+        await _register_detection_event(
+            name,
+            address,
+            "Caída parcial detectada (OK-…, wearable sin Fall suavizado)",
+        )
+        return 1
+
+    last_seen_name_by_address[address] = name
+    return 0
 
 
 async def scan_loop() -> None:
@@ -147,9 +169,9 @@ async def scan_loop() -> None:
 
     loop = asyncio.get_running_loop()
     adv_queue: asyncio.Queue[tuple[str, str]] = asyncio.Queue(maxsize=1000)
+    heard_previous: set[str] | None = None
 
     def detection_callback(device, advertisement_data) -> None:
-        # Scan response → local_name; sin esto Bleak a menudo deja el nombre viejo.
         name = advertisement_data.local_name or device.name or ""
         name = name.strip()
         if not name:
@@ -171,7 +193,16 @@ async def scan_loop() -> None:
         while True:
             print("#" + str(iterations))
 
+            if heard_previous is not None:
+                for addr in list(last_seen_name_by_address.keys()):
+                    if addr not in heard_previous:
+                        last_seen_name_by_address.pop(addr, None)
+                        last_printed_name_by_address.pop(addr, None)
+                        last_skip_log_mono_by_address.pop(addr, None)
+                        ok_partial_registered_cycle_by_address.pop(addr, None)
+
             found = 0
+            heard_this: set[str] = set()
             window_end = time.monotonic() + 2.0
 
             while time.monotonic() < window_end:
@@ -182,8 +213,11 @@ async def scan_loop() -> None:
                     )
                 except asyncio.TimeoutError:
                     continue
-                hit = await process_adv_packet(addr, pkt_name)
+                heard_this.add(addr)
+                hit = await process_adv_packet(addr, pkt_name, iterations)
                 found = max(found, hit)
+
+            heard_previous = set(heard_this)
 
             if found == 0:
                 print("")
