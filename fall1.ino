@@ -87,6 +87,8 @@ void setup()
   BLE.advertise();
     Serial.println("BLE advertising started");
 
+    advertiseNeutral(String("OK-") + worker);
+
     inference_thread.start(mbed::callback(&run_inference_background));
 }
 
@@ -124,6 +126,19 @@ void advertiseFall(String fallCode){
   
   scanData.setLocalName(charBuf);  
   BLE.setScanResponseData(scanData);  
+  BLE.advertise();
+
+}
+
+void advertiseNeutral(const String &label){
+
+  Serial.println("Advertising neutral (no fall)...");
+
+  char charBuf[50];
+  label.toCharArray(charBuf, 50);
+
+  scanData.setLocalName(charBuf);
+  BLE.setScanResponseData(scanData);
   BLE.advertise();
 
 }
@@ -195,20 +210,24 @@ void run_inference_background()
         ei_printf("]\n");
 
       for (size_t ix = 0; ix < EI_CLASSIFIER_LABEL_COUNT; ix++) {
-    
         ei_printf("    %s: %.5f\n", result.classification[ix].label, result.classification[ix].value);
-
-        if ((strcmp(result.classification[ix].label, "Fall") == 0) && (result.classification[ix].value > 0.9)) {
-            myCounter=myCounter+1;
-            advertiseFall("Fall-"+worker+"-"+String(myCounter));   
-            lightsRedOn();
-        }
-
-        if ((strcmp(result.classification[ix].label, "Stand") == 0) && (result.classification[ix].value > 0.9)) {
-            lightsRedOff();
-        }
-       
       }
+
+        static bool bleShowsFall = false;
+        if (strcmp(prediction, "Fall") == 0) {
+            if (!bleShowsFall) {
+                myCounter++;
+                advertiseFall(String("Fall-") + worker + "-" + String(myCounter));
+                lightsRedOn();
+                bleShowsFall = true;
+            }
+        } else {
+            if (bleShowsFall) {
+                advertiseNeutral(String("OK-") + worker);
+                lightsRedOff();
+                bleShowsFall = false;
+            }
+        }
 
         delay(run_inference_every_ms);
     }
@@ -226,8 +245,6 @@ void loop()
 {
     while (1) {
 
-      myCounter=myCounter+1;
-  
       BLE.poll();      
   
         // Determine the next tick (and then sleep later)

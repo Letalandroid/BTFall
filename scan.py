@@ -7,14 +7,14 @@ from termcolor import colored
 import sqlite3 as sl
 import os
 import time
-import string
-import re
 
 con = sl.connect('fall.db')
 cursor = con.cursor()
 
 found = 0
 iterations = 0
+# Solo alertar una vez por cada anuncio Fall-* distinto por dispositivo (MAC).
+last_fall_name_by_address = {}
 
 os.system('clear')
 
@@ -32,45 +32,57 @@ async def scan_loop():
         print("#" + str(iterations))
 
         devices = await BleakScanner.discover(timeout=2)
+        found = 0
 
         for d in devices:
 
             name = d.name
             address = d.address
 
-            if name:
+            if not name:
+                continue
 
-                print(colored(f"    {name}, {address}", 'yellow'))
+            print(colored(f"    {name}, {address}", 'yellow'))
 
-                if "Fall" in name:
+            if "Fall" not in name:
+                last_fall_name_by_address.pop(address, None)
+                continue
 
-                    found = 1
-                    print(colored('Fall detected', 'red'))
+            if last_fall_name_by_address.get(address) == name:
+                print(colored(
+                    "    (mismo anuncio Fall ya notificado para esta MAC; omito)",
+                    "cyan",
+                ))
+                found = 1
+                continue
 
-                    pattern = r'[' + string.punctuation + ']'
-                    nameDb = name
+            last_fall_name_by_address[address] = name
+            found = 1
+            print(colored('Fall detected', 'red'))
 
-                    sql = "SELECT * from FALL WHERE name='" + nameDb + "'"
-                    print(sql)
+            nameDb = name
 
-                    cursor.execute(sql)
-                    records = cursor.fetchall()
+            sql = "SELECT * from FALL WHERE name='" + nameDb + "'"
+            print(sql)
 
-                    if len(records) == 0:
+            cursor.execute(sql)
+            records = cursor.fetchall()
 
-                        print('Adding record: ' + name)
+            if len(records) == 0:
 
-                        fieldArray = name.split("-")
+                print('Adding record: ' + name)
 
-                        sql = "INSERT INTO FALL (name, worker) values ('" + name + "','" + fieldArray[1] + "')"
+                fieldArray = name.split("-")
 
-                        with con:
-                            con.execute(sql)
+                sql = "INSERT INTO FALL (name, worker) values ('" + name + "','" + fieldArray[1] + "')"
 
-                        await asyncio.sleep(5)
+                with con:
+                    con.execute(sql)
 
-                    else:
-                        print(colored('This fall was already in the database', 'green'))
+                await asyncio.sleep(5)
+
+            else:
+                print(colored('This fall was already in the database', 'green'))
 
         if found == 0:
             print("")
