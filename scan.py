@@ -15,8 +15,9 @@ cursor = con.cursor()
 
 found = 0
 iterations = 0
-# Solo alertar una vez por cada anuncio Fall-* distinto por dispositivo (MAC).
-last_fall_name_by_address = {}
+# Último nombre BLE visto por MAC (OK-… o Fall-…). Nuevo evento de caída =
+# pasar de “no Fall” a Fall, o cambiar el texto Fall-* (nuevo contador en el Arduino).
+last_seen_name_by_address = {}
 
 os.system('clear')
 
@@ -50,18 +51,26 @@ async def scan_loop():
             print(colored(f"    {name}, {address}", 'yellow'))
 
             if "Fall" not in name:
-                last_fall_name_by_address.pop(address, None)
+                last_seen_name_by_address[address] = name
                 continue
 
-            if last_fall_name_by_address.get(address) == name:
+            prev = last_seen_name_by_address.get(address)
+            last_seen_name_by_address[address] = name
+
+            new_fall_event = (
+                prev is None
+                or ("Fall" not in prev)
+                or (prev != name)
+            )
+
+            if not new_fall_event:
                 print(colored(
-                    "    (mismo anuncio Fall ya notificado para esta MAC; omito)",
+                    "    (mismo episodio Fall: sin OK intermedio ni cambio de nombre; omito)",
                     "cyan",
                 ))
                 found = 1
                 continue
 
-            last_fall_name_by_address[address] = name
             found = 1
             print(colored('Fall detected', 'red'))
 
