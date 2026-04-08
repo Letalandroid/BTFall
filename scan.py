@@ -8,6 +8,8 @@ import sqlite3 as sl
 import os
 import time
 
+from instrumento_recoleccion import init_instrumento_db, record_fall_event, status_report
+
 con = sl.connect('fall.db')
 cursor = con.cursor()
 
@@ -20,6 +22,9 @@ os.system('clear')
 
 print(colored('Worker Fall Detection v0.2', 'green'))
 print("Roni Bandini - Argentina - Powered by Edge Impulse")
+print("")
+init_instrumento_db()
+print(colored(status_report(), "cyan"))
 print("")
 print("Scanning...")
 
@@ -61,6 +66,19 @@ async def scan_loop():
             print(colored('Fall detected', 'red'))
 
             nameDb = name
+
+            inst = record_fall_event(nameDb, address)
+            if inst.get("ok"):
+                print(
+                    colored(
+                        "    Instrumento Anexo 2: fila "
+                        f"{inst['n_en_instrumento']}/10 — {inst['ficha_etiqueta']} — "
+                        f"N° persona {inst['n_persona']} (row id {inst['row_id']})",
+                        "magenta",
+                    )
+                )
+            else:
+                print(colored("    " + inst["mensaje"], "yellow"))
 
             sql = "SELECT * from FALL WHERE name='" + nameDb + "'"
             print(sql)
