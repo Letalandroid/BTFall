@@ -126,6 +126,8 @@ void advertiseFall(String fallCode){
   
   scanData.setLocalName(charBuf);  
   BLE.setScanResponseData(scanData);  
+  // Nombre también en GAP (no solo scan response) para que los centrales vean Fall-* al instante.
+  BLE.setLocalName(charBuf);
   BLE.advertise();
 
 }
@@ -139,6 +141,7 @@ void advertiseNeutral(const String &label){
 
   scanData.setLocalName(charBuf);
   BLE.setScanResponseData(scanData);
+  BLE.setLocalName(charBuf);
   BLE.advertise();
 
 }

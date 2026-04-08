@@ -331,6 +331,22 @@ def record_fall_event(
         con.close()
 
 
+def ficha_counts(path: Path | str = DEFAULT_DB) -> dict[str, int]:
+    """Conteo de filas por tabla (útil para comprobar que SQLite se actualiza)."""
+    path = Path(path)
+    if not path.is_file():
+        return {t: 0 for t in FICHAS}
+    init_instrumento_db(path)
+    con = _connect(path)
+    try:
+        return {
+            t: int(con.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0])
+            for t in FICHAS
+        }
+    finally:
+        con.close()
+
+
 def status_report(path: Path | str = DEFAULT_DB) -> str:
     path = Path(path)
     if not path.is_file():
