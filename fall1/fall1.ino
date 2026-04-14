@@ -8,11 +8,16 @@
 #include <Arduino_BMI270_BMM150.h>
 #include <ArduinoBLE.h>
 #include <math.h>
+#include <rtos/Mutex.h>
 
 BLEService myService("fff0");
 BLEIntCharacteristic myCharacteristic("fff1", BLERead | BLEBroadcast);
-const uint8_t completeRawAdvertisingData[] = {0x02,0x01,0x06,0x09,0xff,0x01,0x01,0x00,0x01,0x02,0x03,0x04,0x05};   
 BLEAdvertisingData scanData;
+
+/* Cola hilo principal: ArduinoBLE no es seguro desde el hilo de inferencia; solo el loop() aplica cambios. */
+static rtos::Mutex ble_adv_mutex;
+static uint8_t ble_pending_cmd = 0; /* 0=ninguno, 1=Fall, 2=OK neutral */
+static char ble_pending_name[48];
 
 #define RED 22     
 #define BLUE 24     
@@ -117,17 +122,10 @@ void setup()
   myService.addCharacteristic(myCharacteristic);
   BLE.addService(myService);  
 
-  // Build advertising data packet
-  BLEAdvertisingData advData;
-  // If a packet has a raw data parameter, then all the other parameters of the packet will be ignored
-  advData.setRawData(completeRawAdvertisingData, sizeof(completeRawAdvertisingData));  
-  // Copy set parameters in the actual advertising packet
-  BLE.setAdvertisingData(advData);
+  /* No usar setRawData aquí: fija el AD y el nombre local/scan response no llega bien a los centrales. */
+  Serial.println("BLE advertising started");
 
-  BLE.advertise();
-    Serial.println("BLE advertising started");
-
-    advertiseNeutral(String("OK-") + worker);
+  advertiseNeutral(String("OK-") + worker);
 
     inference_thread.start(mbed::callback(&run_inference_background));
 }
@@ -157,38 +155,52 @@ void lightsRedOff(){
   digitalWrite(GREEN, HIGH); 
 }
 
-void advertiseFall(String fallCode, int fallPct, int standPct){
-  
-  Serial.println("Advertising ...");
-
-  char charBuf[50];
-  String payload = fallCode + "-F" + String(fallPct) + "-S" + String(standPct);
-  payload.toCharArray(charBuf, 50);
-  
+static void applyBleLocalName(const char *localName, bool neutral) {
+  if (neutral) {
+    Serial.println("Advertising neutral (no fall)...");
+  } else {
+    Serial.println("Advertising ...");
+  }
   BLE.stopAdvertise();
   delay(20);
-  scanData.setLocalName(charBuf);  
-  BLE.setScanResponseData(scanData);  
-  // Nombre también en GAP (no solo scan response) para que los centrales vean Fall-* al instante.
-  BLE.setLocalName(charBuf);
+  scanData.setLocalName(localName);
+  BLE.setScanResponseData(scanData);
+  BLE.setLocalName(localName);
   BLE.advertise();
-
 }
 
-void advertiseNeutral(const String &label){
+void drainBlePending() {
+  uint8_t cmd = 0;
+  char buf[48];
+  ble_adv_mutex.lock();
+  cmd = ble_pending_cmd;
+  if (cmd != 0) {
+    memcpy(buf, ble_pending_name, sizeof(buf));
+    buf[sizeof(buf) - 1] = '\0';
+    ble_pending_cmd = 0;
+  }
+  ble_adv_mutex.unlock();
+  if (cmd != 0) {
+    applyBleLocalName(buf, cmd == 2);
+  }
+}
 
-  Serial.println("Advertising neutral (no fall)...");
+static void queueBleFall(const String &payload) {
+  ble_adv_mutex.lock();
+  payload.toCharArray(ble_pending_name, sizeof(ble_pending_name));
+  ble_pending_cmd = 1;
+  ble_adv_mutex.unlock();
+}
 
-  char charBuf[50];
-  label.toCharArray(charBuf, 50);
+static void queueBleNeutral(const String &label) {
+  ble_adv_mutex.lock();
+  label.toCharArray(ble_pending_name, sizeof(ble_pending_name));
+  ble_pending_cmd = 2;
+  ble_adv_mutex.unlock();
+}
 
-  BLE.stopAdvertise();
-  delay(20);
-  scanData.setLocalName(charBuf);
-  BLE.setScanResponseData(scanData);
-  BLE.setLocalName(charBuf);
-  BLE.advertise();
-
+void advertiseNeutral(const String &label) {
+  applyBleLocalName(label.c_str(), true);
 }
 
 void killAdvertising(){
@@ -331,7 +343,11 @@ void run_inference_background()
             fall_release_streak = 0;
             if (enter_fall && (axes_ok || bypass_axes)) {
                 myCounter++;
-                advertiseFall(String("Fall-") + worker + "-" + String(myCounter), fallPct, standPct);
+                {
+                  String payload = String("Fall-") + worker + "-" + String(myCounter)
+                      + "-F" + String(fallPct) + "-S" + String(standPct);
+                  queueBleFall(payload);
+                }
                 lightsRedOn();
                 bleShowsFall = true;
             } else if (debug_nn && enter_fall && !axes_ok && !bypass_axes) {
@@ -344,7 +360,7 @@ void run_inference_background()
             if (in_low_fall_band) {
                 fall_release_streak++;
                 if (fall_release_streak >= FALL_RELEASE_CONSEC_FRAMES) {
-                    advertiseNeutral(String("OK-") + worker);
+                    queueBleNeutral(String("OK-") + worker);
                     lightsRedOff();
                     bleShowsFall = false;
                     fall_release_streak = 0;
@@ -370,7 +386,8 @@ void loop()
 {
     while (1) {
 
-      BLE.poll();      
+      BLE.poll();
+      drainBlePending();
   
         // Determine the next tick (and then sleep later)
         uint64_t next_tick = micros() + (EI_CLASSIFIER_INTERVAL_MS * 1000);

@@ -94,6 +94,9 @@ FALL_NAME_RE = re.compile(r"-F(\d+)-S(\d+)$")
 # Máx. caracteres del cuerpo HTTP al registrar errores (p. ej. 403 de Cloudflare/nginx/n8n).
 N8N_ERROR_BODY_MAX_CHARS = 4000
 
+# 1 = imprimir ln vs device.name por paquete (depurar Pi vs wearable)
+BTFALL_DEBUG_BLE = os.environ.get("BTFALL_DEBUG_BLE", "").strip() in ("1", "true", "yes")
+
 
 def _adv_visible_name(device, advertisement_data) -> str:
     """
@@ -386,7 +389,16 @@ async def scan_loop() -> None:
     heard_previous: set[str] | None = None
 
     def detection_callback(device, advertisement_data) -> None:
+        ln_raw = (advertisement_data.local_name or "").strip()
+        dn_raw = (device.name or "").strip()
         name = _adv_visible_name(device, advertisement_data).strip()
+        if BTFALL_DEBUG_BLE and (ln_raw or dn_raw or name):
+            print(
+                colored(
+                    f"    [BLE dbg] ln={ln_raw!r} dn={dn_raw!r} → usado={name!r}",
+                    "yellow",
+                )
+            )
         if not name:
             return
         address = device.address.lower()
