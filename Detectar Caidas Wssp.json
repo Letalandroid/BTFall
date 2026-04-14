@@ -1,0 +1,102 @@
+{
+  "name": "Detectar Caidas Wssp",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "detectar-caidas",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        0
+      ],
+      "id": "2a0c3b9a-df2b-49cd-bd29-6a3d21a46992",
+      "name": "Webhook",
+      "webhookId": "cbb041ff-2c92-4e02-92e5-3a4526a733b4"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://evolution.federico-system-inventary.space/message/sendText/wssp",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "=number",
+              "value": "120363406147228607@g.us"
+            },
+            {
+              "name": "text",
+              "value": "=_{{ $json.body.details.mensaje }}_"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        208,
+        0
+      ],
+      "id": "1c377428-e337-4886-b494-83a8bb463492",
+      "name": "HTTP Request",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "iuf0AAn7yv66UTGt",
+          "name": "Evolution API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "detectar-caidas",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        224
+      ],
+      "id": "376d972e-24df-482f-8812-954aa6f24467",
+      "name": "Webhook1",
+      "webhookId": "cbb041ff-2c92-4e02-92e5-3a4526a733b4",
+      "disabled": true
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "availableInMCP": false,
+    "timeSavedMode": "dynamic",
+    "timezone": "America/Lima",
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "versionId": "e09bccd4-b757-4fd3-aa32-07876f9211a1",
+  "meta": {
+    "instanceId": "708d6f08858b7076494c2b32115a0ed159a04924f53e7f599c86f52b8f47d95d"
+  },
+  "id": "ulIAExUGsaiv4fXn",
+  "tags": []
+}
