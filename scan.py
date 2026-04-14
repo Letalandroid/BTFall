@@ -95,6 +95,27 @@ FALL_NAME_RE = re.compile(r"-F(\d+)-S(\d+)$")
 N8N_ERROR_BODY_MAX_CHARS = 4000
 
 
+def _adv_visible_name(device, advertisement_data) -> str:
+    """
+    Nombre BLE para este evento. En Linux/BlueZ, device.name a menudo queda en OK-* viejo
+    mientras local_name ya trae Fall-* (o al revés). Reglas:
+    - Si local_name trae Fall, usarlo.
+    - Si local_name es OK-*, confiar en eso (no dejar que un Fall cacheado en device.name gane).
+    - Si no hay local_name pero device.name tiene Fall, usarlo (evento sin nombre en este AD).
+    """
+    ln = (advertisement_data.local_name or "").strip()
+    dn = (device.name or "").strip()
+    if ln and "Fall" in ln:
+        return ln
+    if ln and ln.startswith("OK-"):
+        return ln
+    if ln:
+        return ln
+    if dn and "Fall" in dn:
+        return dn
+    return dn
+
+
 def _print_n8n_http_error(exc: BaseException, label: str) -> None:
     """Imprime el fallo completo: HTTPError incluye código, URL y cuerpo de respuesta."""
     print(colored(f"    (error n8n webhook {label}: {exc!r})", "red"))
@@ -365,8 +386,7 @@ async def scan_loop() -> None:
     heard_previous: set[str] | None = None
 
     def detection_callback(device, advertisement_data) -> None:
-        name = advertisement_data.local_name or device.name or ""
-        name = name.strip()
+        name = _adv_visible_name(device, advertisement_data).strip()
         if not name:
             return
         address = device.address.lower()

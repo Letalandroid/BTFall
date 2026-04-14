@@ -165,6 +165,8 @@ void advertiseFall(String fallCode, int fallPct, int standPct){
   String payload = fallCode + "-F" + String(fallPct) + "-S" + String(standPct);
   payload.toCharArray(charBuf, 50);
   
+  BLE.stopAdvertise();
+  delay(20);
   scanData.setLocalName(charBuf);  
   BLE.setScanResponseData(scanData);  
   // Nombre también en GAP (no solo scan response) para que los centrales vean Fall-* al instante.
@@ -180,6 +182,8 @@ void advertiseNeutral(const String &label){
   char charBuf[50];
   label.toCharArray(charBuf, 50);
 
+  BLE.stopAdvertise();
+  delay(20);
   scanData.setLocalName(charBuf);
   BLE.setScanResponseData(scanData);
   BLE.setLocalName(charBuf);
