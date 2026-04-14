@@ -1,7 +1,10 @@
 import asyncio
+import json
 import os
 import sqlite3
 import time
+import urllib.error
+import urllib.request
 
 from bleak import BleakScanner
 from termcolor import colored
@@ -18,6 +21,7 @@ TARGET_ADDRESS: str | None = None
 DB_PATH = "fall_events.db"
 VERBOSE_DEVICE_LOGS = False
 SUMMARY_INTERVAL_SECONDS = 60
+WEBHOOK_URL = "https://n8n.federico-system-inventary.space/webhook-test/detectar-caidas"
 
 # Estado por MAC para deduplicar y confirmar eventos.
 consecutive_fall_seen: dict[str, int] = {}
@@ -68,6 +72,42 @@ def save_fall_event(address: str, name: str, rssi: int | None) -> None:
         conn.commit()
     finally:
         conn.close()
+
+
+def send_fall_webhook(address: str, name: str, rssi: int | None) -> None:
+    # Texto corto y no tecnico para disparar mensajes de WhatsApp.
+    payload = {
+        "event": "fall_detected",
+        "source": "raspberry_pi_btfall",
+        "ts": int(time.time()),
+        "device": {
+            "name": name,
+            "address": address,
+            "rssi": rssi,
+        },
+        "details": {
+            "mensaje": "Se detecto una posible caida del trabajador. Revisar su estado de inmediato.",
+            "tipo": "Alerta de seguridad",
+            "causa_probable": "Movimiento brusco compatible con caida",
+            "accion_sugerida": "Contactar al trabajador y validar si requiere asistencia",
+            "url_revisada": "Panel de monitoreo BTFall",
+        },
+    }
+
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        WEBHOOK_URL,
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            status = getattr(resp, "status", None)
+            print(colored(f"    (webhook enviado: {status})", "green"))
+    except urllib.error.URLError as exc:
+        print(colored(f"    (error enviando webhook: {exc})", "red"))
 
 os.system("clear")
 
@@ -161,6 +201,7 @@ async def scan_loop() -> None:
             found = 1
             print(colored(f"Caída detectada -> {name} ({address}) RSSI {rssi}", "red"))
             save_fall_event(address, name, rssi)
+            send_fall_webhook(address, name, rssi)
             stats["saved_events"] += 1
             print(colored(f"    (guardado en DB: {DB_PATH})", "green"))
 
