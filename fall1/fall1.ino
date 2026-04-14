@@ -30,8 +30,8 @@ int mySeconds=0;
 
 
 /* Private variables ------------------------------------------------------- */
-static bool debug_nn = true;
-static uint32_t run_inference_every_ms = 2000;
+static bool debug_nn = false;
+static uint32_t run_inference_every_ms = 500;
 static rtos::Thread inference_thread(osPriorityLow);
 static float buffer[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE] = { 0 };
 static float inference_buffer[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE];
@@ -165,10 +165,9 @@ void run_inference_background()
     // wait until we have a full buffer
     delay((EI_CLASSIFIER_INTERVAL_MS * EI_CLASSIFIER_RAW_SAMPLE_COUNT) + 100);
 
-    // This is a structure that smoothens the output result
-    // With the default settings 70% of readings should be the same before classifying.
+    // Suavizado mas rapido para bajar latencia total de deteccion.
     ei_classifier_smooth_t smooth;
-    ei_classifier_smooth_init(&smooth, 10 /* no. of readings */, 7 /* min. readings the same */, 0.8 /* min. confidence */, 0.3 /* max anomaly */);
+    ei_classifier_smooth_init(&smooth, 4 /* no. of readings */, 3 /* min. readings the same */, 0.7 /* min. confidence */, 0.3 /* max anomaly */);
 
     while (1) {
         uint32_t age_ms = millis() - last_sample_ms;
@@ -198,34 +197,8 @@ void run_inference_background()
             return;
         }
 
-        // print the predictions
-        ei_printf("Predicciones ");
-        ei_printf("(DSP: %d ms., Classification: %d ms., Anomaly: %d ms.)",
-            result.timing.dsp, result.timing.classification, result.timing.anomaly);
-        ei_printf(": ");
-
         // ei_classifier_smooth_update yields the predicted label
         const char *prediction = ei_classifier_smooth_update(&smooth, &result);
-        ei_printf("%s ", prediction);        
-        
-
-          
-        // print the cumulative results
-        ei_printf(" [ ");
-        for (size_t ix = 0; ix < smooth.count_size; ix++) {
-            ei_printf("%u", smooth.count[ix]);
-            if (ix != smooth.count_size + 1) {
-                ei_printf(", ");
-            }
-            else {
-              ei_printf(" ");
-            }
-        }
-        ei_printf("]\n");
-
-      for (size_t ix = 0; ix < EI_CLASSIFIER_LABEL_COUNT; ix++) {
-        ei_printf("    %s: %.5f\n", result.classification[ix].label, result.classification[ix].value);
-      }
 
         static bool bleShowsFall = false;
         int fallPct = 0;
@@ -237,6 +210,8 @@ void run_inference_background()
                 standPct = (int)roundf(result.classification[ix].value * 100.0f);
             }
         }
+        ei_printf("Pred: %s | F:%d%% S:%d%% | DSP:%dms C:%dms\n",
+            prediction, fallPct, standPct, result.timing.dsp, result.timing.classification);
 
         if (strcmp(prediction, "Fall") == 0) {
             if (!bleShowsFall) {
