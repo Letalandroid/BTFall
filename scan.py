@@ -5,9 +5,8 @@
 # BleakScanner.discover() no siempre refleja ese cambio; usamos escaneo continuo
 # con detection_callback y advertisement_data.local_name (recomendación Bleak).
 #
-# Criterio de estudio: OK-<worker> = caída parcial. Se registra una vez por
-# ciclo impreso (#N) y por MAC si en ese ciclo llega al menos un anuncio OK-*
-# (no se omite por “mismo episodio” entre ciclos). Fall-* sigue con deduplicación
+# Criterio de estudio: OK-<worker> = caída parcial. Cada anuncio OK-* dispara
+# registro + webhook (sin límite por ciclo #N). Fall-* sigue con deduplicación
 # lógica de episodio + reinicio si la MAC no se oyó en el ciclo anterior.
 
 import asyncio
@@ -69,9 +68,6 @@ last_seen_name_by_address: dict[str, str] = {}
 last_printed_name_by_address: dict[str, str] = {}
 last_skip_log_mono_by_address: dict[str, float] = {}
 SKIP_LOG_INTERVAL_SEC = 12.0
-# Último #N en el que ya se registró OK parcial por MAC (solo evita duplicar
-# dentro del mismo ciclo de 2 s, no entre #119 y #120).
-ok_partial_registered_cycle_by_address: dict[str, int] = {}
 
 os.system("clear")
 
@@ -82,21 +78,16 @@ init_instrumento_db()
 print(colored(status_report(), "cyan"))
 print("")
 print(colored(
-    "Escaneo continuo: Fall-* = caída confirmada; OK-* = caída parcial (1 registro "
-    "por ciclo #N y dispositivo si hay anuncios OK). Fall reutiliza episodio hasta "
-    "cambio de nombre o corte de radio.",
+    "Escaneo continuo: Fall-* = caída confirmada; OK-* = caída parcial (cada anuncio OK "
+    "registra y envía n8n). Fall reutiliza episodio hasta cambio de nombre o corte de radio.",
     "cyan",
 ))
 print("Scanning...")
 print("")
 
 N8N_WEBHOOK_URL = (
-    "http://127.0.0.1:5678/webhook-test/detectar-caidas"
+    "http://127.0.0.1:5678/webhook/detectar-caidas"
 )
-# Entre avisos n8n de la misma MAC para OK-* (caída parcial repetida). 0 = sin límite.
-WEBHOOK_OK_PARTIAL_COOLDOWN_SEC = 120.0
-
-last_n8n_ok_partial_mono_by_address: dict[str, float] = {}
 
 FALL_NAME_RE = re.compile(r"-F(\d+)-S(\d+)$")
 
@@ -304,41 +295,33 @@ async def _register_detection_event(name: str, address: str, title: str) -> None
         )
         with con:
             con.execute(sql_ins)
-        # Fall-*: petición n8n antes de la pausa (mismo orden que antes).
-        if name.startswith("Fall"):
-            f_pct, s_pct = _extract_scores(name)
-            await asyncio.to_thread(
-                send_n8n_fall_webhook,
-                name,
-                address,
-                f_pct,
-                s_pct,
-            )
-        await asyncio.sleep(5)
     else:
         print(colored("This fall was already in the database", "green"))
 
-    # OK-*: caída parcial; la fila suele repetirse (mismo nombre) → avisar igual con cooldown.
-    if name.startswith("OK-"):
-        now = time.monotonic()
-        if WEBHOOK_OK_PARTIAL_COOLDOWN_SEC <= 0:
-            allow = True
-        else:
-            prev = last_n8n_ok_partial_mono_by_address.get(address, 0.0)
-            allow = (now - prev) >= WEBHOOK_OK_PARTIAL_COOLDOWN_SEC
-        if allow:
-            last_n8n_ok_partial_mono_by_address[address] = now
-            await asyncio.to_thread(
-                send_n8n_ok_partial_webhook,
-                name,
-                address,
-            )
+    # n8n: una petición por cada vez que el flujo registra el evento (sin throttle).
+    if name.startswith("Fall"):
+        f_pct, s_pct = _extract_scores(name)
+        await asyncio.to_thread(
+            send_n8n_fall_webhook,
+            name,
+            address,
+            f_pct,
+            s_pct,
+        )
+    elif name.startswith("OK-"):
+        await asyncio.to_thread(
+            send_n8n_ok_partial_webhook,
+            name,
+            address,
+        )
+
+    if inserted:
+        await asyncio.sleep(5)
 
 
-async def process_adv_packet(address: str, name: str, scan_cycle: int) -> int:
+async def process_adv_packet(address: str, name: str) -> int:
     """
     Devuelve 1 si en este paquete hubo un evento registrable (Fall u OK parcial).
-    scan_cycle es el número del #N actual (no incrementa hasta terminar la ventana).
     """
     _print_name_if_changed(address, name)
 
@@ -359,9 +342,6 @@ async def process_adv_packet(address: str, name: str, scan_cycle: int) -> int:
 
     if name.startswith("OK-"):
         last_seen_name_by_address[address] = name
-        if ok_partial_registered_cycle_by_address.get(address) == scan_cycle:
-            return 0
-        ok_partial_registered_cycle_by_address[address] = scan_cycle
         await _register_detection_event(
             name,
             address,
@@ -408,7 +388,6 @@ async def scan_loop() -> None:
                         last_seen_name_by_address.pop(addr, None)
                         last_printed_name_by_address.pop(addr, None)
                         last_skip_log_mono_by_address.pop(addr, None)
-                        ok_partial_registered_cycle_by_address.pop(addr, None)
 
             found = 0
             heard_this: set[str] = set()
@@ -423,7 +402,7 @@ async def scan_loop() -> None:
                 except asyncio.TimeoutError:
                     continue
                 heard_this.add(addr)
-                hit = await process_adv_packet(addr, pkt_name, iterations)
+                hit = await process_adv_packet(addr, pkt_name)
                 found = max(found, hit)
 
             heard_previous = set(heard_this)
