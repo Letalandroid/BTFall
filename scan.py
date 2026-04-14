@@ -5,9 +5,9 @@
 # BleakScanner.discover() no siempre refleja ese cambio; usamos escaneo continuo
 # con detection_callback y advertisement_data.local_name (recomendación Bleak).
 #
-# Criterio de estudio: OK-<worker> = caída parcial. Cada anuncio OK-* dispara
-# registro + webhook (sin límite por ciclo #N). Fall-* sigue con deduplicación
-# lógica de episodio + reinicio si la MAC no se oyó en el ciclo anterior.
+# OK-<worker> en el wearable = reposo / sin Fall suavizado (no es alerta por sí solo).
+# Solo se registra “caída parcial / recuperación” cuando el nombre pasa de Fall-* a OK-*.
+# Fall-* = caída confirmada; deduplicación de episodio + reinicio si la MAC no se oyó antes.
 
 import asyncio
 import json
@@ -78,8 +78,8 @@ init_instrumento_db()
 print(colored(status_report(), "cyan"))
 print("")
 print(colored(
-    "Escaneo continuo: Fall-* = caída confirmada; OK-* = caída parcial (cada anuncio OK "
-    "registra y envía n8n). Fall reutiliza episodio hasta cambio de nombre o corte de radio.",
+    "Escaneo continuo: Fall-* = caída confirmada. OK-* en reposo = ignorado. "
+    "Solo Fall→OK (misma MAC) = recuperación / aviso parcial + n8n.",
     "cyan",
 ))
 print("Scanning...")
@@ -183,7 +183,7 @@ def send_n8n_fall_webhook(
 
 
 def send_n8n_ok_partial_webhook(name: str, address: str) -> None:
-    """Webhook para OK-<worker>: posible caída parcial / sin Fall suavizado en el wearable."""
+    """Webhook tras transición Fall*→OK-* (recuperación / fin de alarma en el wearable)."""
     payload = {
         "event": "partial_fall_detected",
         "source": "raspberry_pi_btfall",
@@ -196,12 +196,12 @@ def send_n8n_ok_partial_webhook(name: str, address: str) -> None:
         },
         "details": {
             "mensaje": (
-                "Alerta leve: el wearable informa estado OK sin caída confirmada "
-                "(señal compatible con movimiento brusco o recuperación). Conviene verificar."
+                "El wearable pasó de señal Fall a OK (recuperación o fin de episodio). "
+                "Conviene verificar el estado de la persona."
             ),
-            "tipo": "Alerta preventiva",
-            "causa_probable": "Patrón no clasificado como caída firme por el modelo en el dispositivo.",
-            "accion_sugerida": "Contactar al trabajador para confirmar que está bien.",
+            "tipo": "Seguimiento post-alerta",
+            "causa_probable": "Transición BLE Fall→OK tras clasificación en el dispositivo.",
+            "accion_sugerida": "Confirmar con el trabajador que se encuentra bien.",
             "url_revisada": "Panel de monitoreo BTFall (Raspberry)",
         },
     }
@@ -341,13 +341,17 @@ async def process_adv_packet(address: str, name: str) -> int:
         return 1
 
     if name.startswith("OK-"):
+        prev = last_seen_name_by_address.get(address)
         last_seen_name_by_address[address] = name
-        await _register_detection_event(
-            name,
-            address,
-            "Caída parcial detectada (OK-…, wearable sin Fall suavizado)",
-        )
-        return 1
+        # OK-* solo anuncia “neutral” en el Arduino; no es caída mientras no venga tras Fall-*.
+        if prev is not None and ("Fall" in prev):
+            await _register_detection_event(
+                name,
+                address,
+                "Recuperación / posible caída parcial (transición Fall→OK en el wearable)",
+            )
+            return 1
+        return 0
 
     last_seen_name_by_address[address] = name
     return 0
