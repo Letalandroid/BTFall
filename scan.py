@@ -11,9 +11,12 @@
 # lógica de episodio + reinicio si la MAC no se oyó en el ciclo anterior.
 
 import asyncio
+import json
 import os
 import re
 import time
+import urllib.error
+import urllib.request
 
 from bleak import BleakScanner
 from termcolor import colored
@@ -87,6 +90,10 @@ print(colored(
 print("Scanning...")
 print("")
 
+N8N_WEBHOOK_URL = (
+    "https://n8n.federico-system-inventary.space/webhook-test/detectar-caidas"
+)
+
 FALL_NAME_RE = re.compile(r"-F(\d+)-S(\d+)$")
 
 
@@ -95,6 +102,58 @@ def _extract_scores(name: str) -> tuple[int | None, int | None]:
     if not m:
         return None, None
     return int(m.group(1)), int(m.group(2))
+
+
+def send_n8n_fall_webhook(
+    name: str,
+    address: str,
+    fall_pct: int | None,
+    stand_pct: int | None,
+) -> None:
+    """Envía JSON a n8n para WhatsApp / automatización (mensaje no técnico)."""
+    if fall_pct is not None and stand_pct is not None:
+        mensaje = (
+            "Se detectó una posible caída. El modelo indica "
+            f"{fall_pct}% de probabilidad de caída y {stand_pct}% de estar de pie."
+        )
+    else:
+        mensaje = (
+            "Se detectó una posible caída según el wearable. "
+            "Revisa el estado de la persona de inmediato."
+        )
+
+    payload = {
+        "event": "fall_detected",
+        "source": "raspberry_pi_btfall",
+        "ts": int(time.time()),
+        "device": {
+            "name": name,
+            "address": address,
+            "fall_pct": fall_pct,
+            "stand_pct": stand_pct,
+        },
+        "details": {
+            "mensaje": mensaje,
+            "tipo": "Alerta de seguridad",
+            "causa_probable": "Señal compatible con caída o impacto brusco (sensor de movimiento).",
+            "accion_sugerida": "Contactar al trabajador y verificar si necesita ayuda.",
+            "url_revisada": "Panel de monitoreo BTFall (Raspberry)",
+        },
+    }
+
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    req = urllib.request.Request(
+        N8N_WEBHOOK_URL,
+        data=data,
+        headers={"Content-Type": "application/json; charset=utf-8"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            code = getattr(resp, "status", None) or resp.getcode()
+            print(colored(f"    (n8n webhook OK: HTTP {code})", "green"))
+    except urllib.error.URLError as exc:
+        print(colored(f"    (error n8n webhook: {exc})", "red"))
 
 
 def _print_name_if_changed(address: str, name: str) -> None:
@@ -170,6 +229,16 @@ async def _register_detection_event(name: str, address: str, title: str) -> None
         )
         with con:
             con.execute(sql_ins)
+        # Webhook n8n solo en caídas confirmadas por nombre Fall-* (no en OK- parcial).
+        if name.startswith("Fall"):
+            f_pct, s_pct = _extract_scores(name)
+            await asyncio.to_thread(
+                send_n8n_fall_webhook,
+                name,
+                address,
+                f_pct,
+                s_pct,
+            )
         await asyncio.sleep(5)
     else:
         print(colored("This fall was already in the database", "green"))
