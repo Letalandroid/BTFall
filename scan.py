@@ -195,17 +195,11 @@ def send_n8n_fall_webhook(
     fall_pct: int | None,
     stand_pct: int | None,
 ) -> None:
-    """Envía JSON a n8n para WhatsApp / automatización (mensaje no técnico)."""
-    if fall_pct is not None and stand_pct is not None:
-        mensaje = (
-            "Se detectó una posible caída. El modelo indica "
-            f"{fall_pct}% de probabilidad de caída y {stand_pct}% de estar de pie."
-        )
-    else:
-        mensaje = (
-            "Se detectó una posible caída según el wearable. "
-            "Revisa el estado de la persona de inmediato."
-        )
+    """Envía JSON a n8n para WhatsApp / automatización (texto breve; % solo en device)."""
+    mensaje = (
+        "Posible caída detectada. "
+        "Contacta al trabajador y comprueba que esté bien cuanto antes."
+    )
 
     payload = {
         "event": "fall_detected",
@@ -219,9 +213,6 @@ def send_n8n_fall_webhook(
         },
         "details": {
             "mensaje": mensaje,
-            "tipo": "Alerta de seguridad",
-            "causa_probable": "Señal compatible con caída o impacto brusco (sensor de movimiento).",
-            "accion_sugerida": "Contactar al trabajador y verificar si necesita ayuda.",
             "url_revisada": "Panel de monitoreo BTFall (Raspberry)",
         },
     }
@@ -242,7 +233,7 @@ def send_n8n_fall_webhook(
 
 
 def send_n8n_ok_partial_webhook(name: str, address: str) -> None:
-    """Webhook tras transición Fall*→OK-* (recuperación / fin de alarma en el wearable)."""
+    """Webhook tras transición Fall*→OK-* (recuperación / fin de alarma en el dispositivo)."""
     payload = {
         "event": "partial_fall_detected",
         "source": "raspberry_pi_btfall",
@@ -255,12 +246,9 @@ def send_n8n_ok_partial_webhook(name: str, address: str) -> None:
         },
         "details": {
             "mensaje": (
-                "El wearable pasó de señal Fall a OK (recuperación o fin de episodio). "
-                "Conviene verificar el estado de la persona."
+                "La alerta de caída dejó de mostrarse. "
+                "Confirma con el trabajador que se encuentra bien."
             ),
-            "tipo": "Seguimiento post-alerta",
-            "causa_probable": "Transición BLE Fall→OK tras clasificación en el dispositivo.",
-            "accion_sugerida": "Confirmar con el trabajador que se encuentra bien.",
             "url_revisada": "Panel de monitoreo BTFall (Raspberry)",
         },
     }
