@@ -46,9 +46,11 @@ int mySeconds=0;
 
 
 /* Private variables ------------------------------------------------------- */
-static bool debug_nn = true;
+/* debug_nn=true imprime el vector de features completo dentro de run_classifier
+ * (carga muy alta en UART; puede disparar tiempos DSP aparentes de segundos). */
+static bool debug_nn = false;
 static uint32_t run_inference_every_ms = 2000;
-static rtos::Thread inference_thread(osPriorityLow);
+static rtos::Thread inference_thread(osPriorityNormal);
 static float buffer[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE] = { 0 };
 static float inference_buffer[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE];
 static volatile uint32_t missed_samples = 0;
