@@ -43,7 +43,10 @@ int mySeconds=0;
 #define FALL_PCT_BYPASS_AXES      90     // si el modelo está muy seguro, no exigir ejes
 #endif
 #ifndef FALL_PCT_TRIGGER
-#define FALL_PCT_TRIGGER          60     // regla solicitada: >=60% Fall ya cuenta como caída
+#define FALL_PCT_TRIGGER          60     // entrar en alarma Fall si Fall% >= esto (raw)
+#endif
+#ifndef FALL_PCT_RELEASE
+#define FALL_PCT_RELEASE          42     // salir a OK solo si Fall% cae por debajo (histéresis; evita parpadeo)
 #endif
 
 /* Giroscopio (readGyroscope: rad/s en Nano 33 BLE Rev2): rotación brusca suele acompañar caída/torsión. */
@@ -301,7 +304,8 @@ void run_inference_background()
         bool gyro_snap = last_gyro_valid;
         bool axes_ok = axes_support_fall_decision(
             last_ax, last_ay, last_az, gx_snap, gy_snap, gz_snap, gyro_snap);
-        bool bypass_axes = (fallPct >= FALL_PCT_BYPASS_AXES);
+        /* Con umbral raw >= TRIGGER no exigir IMU (si no, un frame >60% y el siguiente <60% volvía a OK). */
+        bool bypass_axes = (fallPct >= FALL_PCT_BYPASS_AXES) || (fallPct >= FALL_PCT_TRIGGER);
 
 #if PRINT_IMU_DEBUG_LINE
         ei_printf(
@@ -311,28 +315,26 @@ void run_inference_background()
 #endif
 
         static bool bleShowsFall = false;
-        bool model_says_fall = (strcmp(prediction, "Fall") == 0) || (fallPct >= FALL_PCT_TRIGGER);
+        bool enter_fall = (strcmp(prediction, "Fall") == 0) || (fallPct >= FALL_PCT_TRIGGER);
+        /* Mientras la alarma está activa, no volver a OK por un solo frame con Fall% <60% (histéresis). */
+        bool leave_fall = (fallPct < FALL_PCT_RELEASE);
 
-        if (model_says_fall) {
-            if (!bleShowsFall) {
-                if (axes_ok || bypass_axes) {
-                    myCounter++;
-                    advertiseFall(String("Fall-") + worker + "-" + String(myCounter), fallPct, standPct);
-                    lightsRedOn();
-                    bleShowsFall = true;
-                } else if (debug_nn) {
-                    ei_printf(
-                        "Fall modelo pero sensores no confirman acc=(%.2f,%.2f,%.2f) m/s² gyro=(%.3f,%.3f,%.3f) rad/s valid=%d\n",
-                        (double)last_ax, (double)last_ay, (double)last_az,
-                        (double)gx_snap, (double)gy_snap, (double)gz_snap, gyro_snap ? 1 : 0);
-                }
+        if (!bleShowsFall) {
+            if (enter_fall && (axes_ok || bypass_axes)) {
+                myCounter++;
+                advertiseFall(String("Fall-") + worker + "-" + String(myCounter), fallPct, standPct);
+                lightsRedOn();
+                bleShowsFall = true;
+            } else if (debug_nn && enter_fall && !axes_ok && !bypass_axes) {
+                ei_printf(
+                    "Fall modelo pero sensores no confirman acc=(%.2f,%.2f,%.2f) m/s² gyro=(%.3f,%.3f,%.3f) rad/s valid=%d\n",
+                    (double)last_ax, (double)last_ay, (double)last_az,
+                    (double)gx_snap, (double)gy_snap, (double)gz_snap, gyro_snap ? 1 : 0);
             }
-        } else {
-            if (bleShowsFall) {
-                advertiseNeutral(String("OK-") + worker);
-                lightsRedOff();
-                bleShowsFall = false;
-            }
+        } else if (leave_fall) {
+            advertiseNeutral(String("OK-") + worker);
+            lightsRedOff();
+            bleShowsFall = false;
         }
 
         delay(run_inference_every_ms);
