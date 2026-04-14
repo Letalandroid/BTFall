@@ -37,6 +37,8 @@ static float buffer[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE] = { 0 };
 static float inference_buffer[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE];
 static volatile uint32_t last_sample_ms = 0;
 static volatile uint32_t missed_samples = 0;
+static const int FALL_TRIGGER_PCT = 85;
+static const int STAND_TRIGGER_PCT = 85;
 
 /* Forward declaration */
 void run_inference_background();
@@ -165,10 +167,6 @@ void run_inference_background()
     // wait until we have a full buffer
     delay((EI_CLASSIFIER_INTERVAL_MS * EI_CLASSIFIER_RAW_SAMPLE_COUNT) + 100);
 
-    // Suavizado mas rapido para bajar latencia total de deteccion.
-    ei_classifier_smooth_t smooth;
-    ei_classifier_smooth_init(&smooth, 4 /* no. of readings */, 3 /* min. readings the same */, 0.7 /* min. confidence */, 0.3 /* max anomaly */);
-
     while (1) {
         uint32_t age_ms = millis() - last_sample_ms;
         if (last_sample_ms == 0 || age_ms > 1500) {
@@ -197,9 +195,6 @@ void run_inference_background()
             return;
         }
 
-        // ei_classifier_smooth_update yields the predicted label
-        const char *prediction = ei_classifier_smooth_update(&smooth, &result);
-
         static bool bleShowsFall = false;
         int fallPct = 0;
         int standPct = 0;
@@ -210,10 +205,18 @@ void run_inference_background()
                 standPct = (int)roundf(result.classification[ix].value * 100.0f);
             }
         }
-        ei_printf("Pred: %s | F:%d%% S:%d%% | DSP:%dms C:%dms\n",
-            prediction, fallPct, standPct, result.timing.dsp, result.timing.classification);
 
-        if (strcmp(prediction, "Fall") == 0) {
+        const char *decision = "uncertain";
+        if (fallPct >= FALL_TRIGGER_PCT && fallPct > standPct) {
+            decision = "Fall";
+        } else if (standPct >= STAND_TRIGGER_PCT && standPct > fallPct) {
+            decision = "Stand";
+        }
+
+        ei_printf("Pred: %s | F:%d%% S:%d%% | DSP:%dms C:%dms\n",
+            decision, fallPct, standPct, result.timing.dsp, result.timing.classification);
+
+        if (strcmp(decision, "Fall") == 0) {
             if (!bleShowsFall) {
                 myCounter++;
                 advertiseFall(String("Fall-") + worker + "-" + String(myCounter), fallPct, standPct);
@@ -221,7 +224,7 @@ void run_inference_background()
                 bleShowsFall = true;
             }
         } else {
-            if (bleShowsFall) {
+            if (bleShowsFall && strcmp(decision, "Stand") == 0) {
                 advertiseNeutral(String("OK-") + worker);
                 lightsRedOff();
                 bleShowsFall = false;
@@ -231,8 +234,6 @@ void run_inference_background()
         delay(run_inference_every_ms);
     }
 
-    ei_classifier_smooth_free(&smooth);
-    
 }
 
 /**
