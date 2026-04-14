@@ -67,7 +67,11 @@ iterations = 0
 last_seen_name_by_address: dict[str, str] = {}
 last_printed_name_by_address: dict[str, str] = {}
 last_skip_log_mono_by_address: dict[str, float] = {}
+# Última vez que vimos un ADV de esa MAC (no borrar estado por una ventana sin paquetes).
+last_heard_mono_by_address: dict[str, float] = {}
 SKIP_LOG_INTERVAL_SEC = 12.0
+# Tras N s sin ningún paquete de esa MAC, olvidar estado (evita crecer sin límite).
+BTFALL_STALE_MAC_SEC = float(os.environ.get("BTFALL_STALE_MAC_SEC", "300").strip() or "300")
 
 # Debe coincidir con `worker` en fall1.ino (nombre sintético desde manufacturer data).
 BTFALL_WORKER = os.environ.get("BTFALL_WORKER", "Smith").strip() or "Smith"
@@ -287,6 +291,17 @@ def _print_name_if_changed(address: str, name: str) -> None:
         print(colored(f"    {name}, {address}", "yellow"))
 
 
+def _purge_stale_ble_addresses() -> None:
+    """No confundir con ventanas de 2 s sin ADV: antes se borraba el estado y se repetían alertas."""
+    now = time.monotonic()
+    for addr in list(last_seen_name_by_address.keys()):
+        if now - last_heard_mono_by_address.get(addr, 0) > BTFALL_STALE_MAC_SEC:
+            last_seen_name_by_address.pop(addr, None)
+            last_printed_name_by_address.pop(addr, None)
+            last_skip_log_mono_by_address.pop(addr, None)
+            last_heard_mono_by_address.pop(addr, None)
+
+
 def _maybe_skip_log(address: str) -> None:
     now = time.monotonic()
     if now - last_skip_log_mono_by_address.get(address, 0) < SKIP_LOG_INTERVAL_SEC:
@@ -353,16 +368,17 @@ async def _register_detection_event(name: str, address: str, title: str) -> None
     else:
         print(colored("This fall was already in the database", "green"))
 
-    # n8n: una petición por cada vez que el flujo registra el evento (sin throttle).
+    # n8n: caída solo al insertar fila nueva (evita spam si el mismo Fall-* se re-registra por error).
     if name.startswith("Fall"):
-        f_pct, s_pct = _extract_scores(name)
-        await asyncio.to_thread(
-            send_n8n_fall_webhook,
-            name,
-            address,
-            f_pct,
-            s_pct,
-        )
+        if inserted:
+            f_pct, s_pct = _extract_scores(name)
+            await asyncio.to_thread(
+                send_n8n_fall_webhook,
+                name,
+                address,
+                f_pct,
+                s_pct,
+            )
     elif name.startswith("OK-"):
         await asyncio.to_thread(
             send_n8n_ok_partial_webhook,
@@ -378,6 +394,7 @@ async def process_adv_packet(address: str, name: str) -> int:
     """
     Devuelve 1 si en este paquete hubo un evento registrable (Fall u OK parcial).
     """
+    last_heard_mono_by_address[address] = time.monotonic()
     _print_name_if_changed(address, name)
 
     if "Fall" in name:
@@ -417,7 +434,6 @@ async def scan_loop() -> None:
 
     loop = asyncio.get_running_loop()
     adv_queue: asyncio.Queue[tuple[str, str]] = asyncio.Queue(maxsize=1000)
-    heard_previous: set[str] | None = None
 
     def detection_callback(device, advertisement_data) -> None:
         ln_raw = (advertisement_data.local_name or "").strip()
@@ -450,12 +466,7 @@ async def scan_loop() -> None:
         while True:
             print("#" + str(iterations))
 
-            if heard_previous is not None:
-                for addr in list(last_seen_name_by_address.keys()):
-                    if addr not in heard_previous:
-                        last_seen_name_by_address.pop(addr, None)
-                        last_printed_name_by_address.pop(addr, None)
-                        last_skip_log_mono_by_address.pop(addr, None)
+            _purge_stale_ble_addresses()
 
             found = 0
             heard_this: set[str] = set()
@@ -472,8 +483,6 @@ async def scan_loop() -> None:
                 heard_this.add(addr)
                 hit = await process_adv_packet(addr, pkt_name)
                 found = max(found, hit)
-
-            heard_previous = set(heard_this)
 
             if found == 0:
                 print("")

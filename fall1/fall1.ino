@@ -53,10 +53,17 @@ int mySeconds=0;
 #define FALL_PCT_BYPASS_AXES      90     // si el modelo está muy seguro, no exigir ejes
 #endif
 #ifndef FALL_PCT_TRIGGER
-#define FALL_PCT_TRIGGER          60     // entrar en alarma Fall si Fall% >= esto (raw)
+#define FALL_PCT_TRIGGER          60     // solo referencia legado; la lógica usa FALL_PROB_*
 #endif
 #ifndef FALL_PCT_RELEASE
-#define FALL_PCT_RELEASE          42     // debajo de esto cuenta como “zona baja” para poder salir
+#define FALL_PCT_RELEASE          42
+#endif
+/* Umbral sobre la probabilidad *raw* del modelo (coincide con lo que imprime Serial como 0.xx). */
+#ifndef FALL_PROB_TRIGGER
+#define FALL_PROB_TRIGGER           0.60f
+#endif
+#ifndef FALL_PROB_RELEASE
+#define FALL_PROB_RELEASE           0.42f
 #endif
 /* No volver a OK por un solo frame ruidoso (p. ej. Fall 80% → 6% → 63%): la Pi no alcanza a ver Fall-*. */
 #ifndef FALL_RELEASE_CONSEC_FRAMES
@@ -334,13 +341,17 @@ void run_inference_background()
         ei_printf("    %s: %.5f\n", result.classification[ix].label, result.classification[ix].value);
       }
 
+      float fall_prob = 0.0f;
+      float stand_prob = 0.0f;
       int fallPct = 0;
       int standPct = 0;
       for (size_t ix = 0; ix < EI_CLASSIFIER_LABEL_COUNT; ix++) {
         if (strcmp(result.classification[ix].label, "Fall") == 0) {
-          fallPct = (int)roundf(result.classification[ix].value * 100.0f);
+          fall_prob = result.classification[ix].value;
+          fallPct = (int)roundf(fall_prob * 100.0f);
         } else if (strcmp(result.classification[ix].label, "Stand") == 0) {
-          standPct = (int)roundf(result.classification[ix].value * 100.0f);
+          stand_prob = result.classification[ix].value;
+          standPct = (int)roundf(stand_prob * 100.0f);
         }
       }
 
@@ -354,8 +365,9 @@ void run_inference_background()
         bool gyro_snap = last_gyro_valid;
         bool axes_ok = axes_support_fall_decision(
             last_ax, last_ay, last_az, gx_snap, gy_snap, gz_snap, gyro_snap);
-        /* Con umbral raw >= TRIGGER no exigir IMU (si no, un frame >60% y el siguiente <60% volvía a OK). */
-        bool bypass_axes = (fallPct >= FALL_PCT_BYPASS_AXES) || (fallPct >= FALL_PCT_TRIGGER);
+        /* Umbral en float: round(0.595*100)=60 pero 0.595<0.60; Serial muestra 0.595 como “casi 0.6”. */
+        bool bypass_axes = (fall_prob * 100.0f >= (float)FALL_PCT_BYPASS_AXES)
+            || (fall_prob >= FALL_PROB_TRIGGER);
 
 #if PRINT_IMU_DEBUG_LINE
         ei_printf(
@@ -366,8 +378,8 @@ void run_inference_background()
 
         static bool bleShowsFall = false;
         static uint8_t fall_release_streak = 0;
-        bool enter_fall = (strcmp(prediction, "Fall") == 0) || (fallPct >= FALL_PCT_TRIGGER);
-        bool in_low_fall_band = (fallPct < FALL_PCT_RELEASE);
+        bool enter_fall = (strcmp(prediction, "Fall") == 0) || (fall_prob >= FALL_PROB_TRIGGER);
+        bool in_low_fall_band = (fall_prob < FALL_PROB_RELEASE);
 
         if (!bleShowsFall) {
             fall_release_streak = 0;
