@@ -43,7 +43,13 @@ int mySeconds=0;
 #define FALL_PCT_BYPASS_AXES      90     // si el modelo está muy seguro, no exigir ejes
 #endif
 
-
+/* Giroscopio (readGyroscope: rad/s en Nano 33 BLE Rev2): rotación brusca suele acompañar caída/torsión. */
+#ifndef GYRO_MAG_RAD_S_MIN
+#define GYRO_MAG_RAD_S_MIN        2.2f   // |ω| total por encima de esto cuenta como evento (≈126°/s)
+#endif
+#ifndef PRINT_IMU_DEBUG_LINE
+#define PRINT_IMU_DEBUG_LINE      0      // 1 = una línea Serial con acc+gyro tras cada inferencia (mucha carga UART)
+#endif
 
 /* Private variables ------------------------------------------------------- */
 /* debug_nn=true imprime el vector de features completo dentro de run_classifier
@@ -54,6 +60,11 @@ static rtos::Thread inference_thread(osPriorityNormal);
 static float buffer[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE] = { 0 };
 static float inference_buffer[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE];
 static volatile uint32_t missed_samples = 0;
+/* Última muestra de giro (rad/s), alineada con el último triplete acc del buffer EI. */
+static volatile float last_gx = 0.0f;
+static volatile float last_gy = 0.0f;
+static volatile float last_gz = 0.0f;
+static volatile bool last_gyro_valid = false;
 
 /* Forward declaration */
 void run_inference_background();
@@ -176,10 +187,10 @@ float ei_get_sign(float number) {
 }
 
 /**
- * Usa los últimos x,y,z (m/s²) del buffer de inferencia como factor extra.
- * Devuelve true si la magnitud o la inclinación respecto a Z son coherentes con caída/impacto.
+ * Heurística física además del modelo EI: aceleración (m/s²) + opcionalmente giro (rad/s).
+ * Devuelve true si hay señal de impacto, inclinación fuerte o rotación significativa.
  */
-bool axes_support_fall_decision(float ax, float ay, float az)
+bool axes_support_fall_decision(float ax, float ay, float az, float gx, float gy, float gz, bool gyro_valid)
 {
     const float g = CONVERT_G_TO_MS2;
     float mag = sqrtf(ax * ax + ay * ay + az * az);
@@ -197,7 +208,13 @@ bool axes_support_fall_decision(float ax, float ay, float az)
     float tilt_deg = acosf(zu) * (180.0f / 3.14159265f);
     bool orientation_event = (tilt_deg >= AXES_FALL_TILT_DEG_MIN);
 
-    return magnitude_event || orientation_event;
+    bool gyro_event = false;
+    if (gyro_valid) {
+        float gyro_mag = sqrtf(gx * gx + gy * gy + gz * gz);
+        gyro_event = (gyro_mag >= GYRO_MAG_RAD_S_MIN);
+    }
+
+    return magnitude_event || orientation_event || gyro_event;
 }
 
 
@@ -275,8 +292,20 @@ void run_inference_background()
         float last_ax = inference_buffer[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE - 3];
         float last_ay = inference_buffer[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE - 2];
         float last_az = inference_buffer[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE - 1];
-        bool axes_ok = axes_support_fall_decision(last_ax, last_ay, last_az);
+        float gx_snap = last_gx;
+        float gy_snap = last_gy;
+        float gz_snap = last_gz;
+        bool gyro_snap = last_gyro_valid;
+        bool axes_ok = axes_support_fall_decision(
+            last_ax, last_ay, last_az, gx_snap, gy_snap, gz_snap, gyro_snap);
         bool bypass_axes = (fallPct >= FALL_PCT_BYPASS_AXES);
+
+#if PRINT_IMU_DEBUG_LINE
+        ei_printf(
+            "IMU acc(m/s²) ax=%.2f ay=%.2f az=%.2f | gyro(rad/s) gx=%.3f gy=%.3f gz=%.3f valid=%d\n",
+            (double)last_ax, (double)last_ay, (double)last_az,
+            (double)gx_snap, (double)gy_snap, (double)gz_snap, gyro_snap ? 1 : 0);
+#endif
 
         static bool bleShowsFall = false;
         bool model_says_fall = (strcmp(prediction, "Fall") == 0);
@@ -290,9 +319,9 @@ void run_inference_background()
                     bleShowsFall = true;
                 } else if (debug_nn) {
                     ei_printf(
-                        "Fall modelo pero ejes no confirman (ax,ay,az)=(%.2f,%.2f,%.2f) m/s² — ajustar umbral o esperar más muestras\n",
-                        (double)last_ax, (double)last_ay, (double)last_az
-                    );
+                        "Fall modelo pero sensores no confirman acc=(%.2f,%.2f,%.2f) m/s² gyro=(%.3f,%.3f,%.3f) rad/s valid=%d\n",
+                        (double)last_ax, (double)last_ay, (double)last_az,
+                        (double)gx_snap, (double)gy_snap, (double)gz_snap, gyro_snap ? 1 : 0);
                 }
             }
         } else {
@@ -348,6 +377,14 @@ void loop()
         }
         missed_samples = 0;
 
+        float gx = 0.0f;
+        float gy = 0.0f;
+        float gz = 0.0f;
+        bool gyro_ok = false;
+        if (IMU.gyroscopeAvailable()) {
+            gyro_ok = IMU.readGyroscope(gx, gy, gz);
+        }
+
         // roll the buffer -3 points so we can overwrite the last one
         numpy::roll(buffer, EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE, -3);
 
@@ -365,6 +402,16 @@ void loop()
         buffer[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE - 3] *= CONVERT_G_TO_MS2;
         buffer[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE - 2] *= CONVERT_G_TO_MS2;
         buffer[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE - 1] *= CONVERT_G_TO_MS2;
+
+        /* Misma marca temporal que el último triplete (para heurística giro + aceleración). */
+        if (gyro_ok) {
+            last_gx = gx;
+            last_gy = gy;
+            last_gz = gz;
+            last_gyro_valid = true;
+        } else {
+            last_gyro_valid = false;
+        }
 
         // and wait for next tick
         uint64_t now_us = micros();
