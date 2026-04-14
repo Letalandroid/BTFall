@@ -55,22 +55,22 @@ void setup()
     
     delay(5000);
     
-    Serial.println("Edge Impulse Inferencing Demo");
+    Serial.println("Demo de inferencia de Edge Impulse");
 
     if (!IMU.begin()) {
-        ei_printf("Failed to initialize IMU!\r\n");
+        ei_printf("No se pudo inicializar la IMU.\r\n");
     }
     else {
-        ei_printf("IMU initialized\r\n");
+        ei_printf("IMU inicializada\r\n");
     }
 
     if (EI_CLASSIFIER_RAW_SAMPLES_PER_FRAME != 3) {
-        ei_printf("ERR: EI_CLASSIFIER_RAW_SAMPLES_PER_FRAME should be equal to 3 (the 3 sensor axes)\n");
+        ei_printf("ERR: EI_CLASSIFIER_RAW_SAMPLES_PER_FRAME debe ser 3 (los 3 ejes del sensor)\n");
         return;
     }
 
      if (!BLE.begin()) {
-    Serial.println("failed to initialize BLE!");
+    Serial.println("No se pudo inicializar BLE.");
     while (1);
   }
 
@@ -85,7 +85,7 @@ void setup()
   BLE.setAdvertisingData(advData);
 
   BLE.advertise();
-    Serial.println("BLE advertising started");
+    Serial.println("Publicidad BLE iniciada");
 
     advertiseNeutral(String("OK-") + worker);
 
@@ -119,7 +119,7 @@ void lightsRedOff(){
 
 void advertiseFall(String fallCode){
   
-  Serial.println("Advertising ...");
+  Serial.println("Publicando ...");
 
   char charBuf[50];
   fallCode.toCharArray(charBuf, 50);
@@ -134,7 +134,7 @@ void advertiseFall(String fallCode){
 
 void advertiseNeutral(const String &label){
 
-  Serial.println("Advertising neutral (no fall)...");
+  Serial.println("Publicando estado neutral (sin caida)...");
 
   char charBuf[50];
   label.toCharArray(charBuf, 50);
@@ -147,7 +147,7 @@ void advertiseNeutral(const String &label){
 }
 
 void killAdvertising(){
-    Serial.println("Stop advertising ...");
+    Serial.println("Detener publicidad ...");
     BLE.stopAdvertise();  
 }
 
@@ -174,7 +174,7 @@ void run_inference_background()
         signal_t signal;
         int err = numpy::signal_from_buffer(inference_buffer, EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE, &signal);
         if (err != 0) {
-            ei_printf("Failed to create signal from buffer (%d)\n", err);
+            ei_printf("No se pudo crear la senal desde el buffer (%d)\n", err);
             return;
         }
 
@@ -183,12 +183,12 @@ void run_inference_background()
 
         err = run_classifier(&signal, &result, debug_nn);
         if (err != EI_IMPULSE_OK) {
-            ei_printf("ERR: Failed to run classifier (%d)\n", err);
+            ei_printf("ERR: No se pudo ejecutar el clasificador (%d)\n", err);
             return;
         }
 
         // print the predictions
-        ei_printf("Predictions ");
+        ei_printf("Predicciones ");
         ei_printf("(DSP: %d ms., Classification: %d ms., Anomaly: %d ms.)",
             result.timing.dsp, result.timing.classification, result.timing.anomaly);
         ei_printf(": ");
