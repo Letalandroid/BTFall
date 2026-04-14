@@ -13,11 +13,16 @@
 BLEService myService("fff0");
 BLEIntCharacteristic myCharacteristic("fff1", BLERead | BLEBroadcast);
 BLEAdvertisingData scanData;
+/* AD principal: flags + manufacturer (0xFFFF + payload BTFall). El nombre local a veces solo va en scan response y BlueZ lo cachea mal. */
+static BLEAdvertisingData advPrimary;
 
 /* Cola hilo principal: ArduinoBLE no es seguro desde el hilo de inferencia; solo el loop() aplica cambios. */
 static rtos::Mutex ble_adv_mutex;
 static uint8_t ble_pending_cmd = 0; /* 0=ninguno, 1=Fall, 2=OK neutral */
 static char ble_pending_name[48];
+static uint8_t ble_pending_fp = 0;
+static uint8_t ble_pending_sp = 0;
+static uint16_t ble_pending_episode = 0;
 
 #define RED 22     
 #define BLUE 24     
@@ -155,7 +160,9 @@ void lightsRedOff(){
   digitalWrite(GREEN, HIGH); 
 }
 
-static void applyBleLocalName(const char *localName, bool neutral) {
+/* Company 0xFFFF + 6 B: 'B''T' state(0=OK,1=Fall) ep fp sp — la Pi reconstruye Fall-<worker>-ep-Ffp-Ssp */
+static void applyBleLocalName(
+    const char *localName, bool neutral, uint8_t fp, uint8_t sp, uint16_t episode) {
   if (neutral) {
     Serial.println("Advertising neutral (no fall)...");
   } else {
@@ -163,6 +170,18 @@ static void applyBleLocalName(const char *localName, bool neutral) {
   }
   BLE.stopAdvertise();
   delay(20);
+
+  uint8_t state = neutral ? 0 : 1;
+  uint8_t ep_lo = (uint8_t)(episode & 0xFF);
+  uint8_t ep_hi = (uint8_t)((episode >> 8) & 0xFF);
+  uint8_t mfgBody[] = {'B', 'T', state, ep_lo, ep_hi, fp, sp};
+
+  advPrimary.clear();
+  advPrimary.setFlags(0x06);
+  advPrimary.setManufacturerData(0xFFFF, mfgBody, sizeof(mfgBody));
+  BLE.setAdvertisingData(advPrimary);
+
+  scanData.clear();
   scanData.setLocalName(localName);
   BLE.setScanResponseData(scanData);
   BLE.setLocalName(localName);
@@ -172,22 +191,30 @@ static void applyBleLocalName(const char *localName, bool neutral) {
 void drainBlePending() {
   uint8_t cmd = 0;
   char buf[48];
+  uint8_t fp = 0, sp = 0;
+  uint16_t episode = 0;
   ble_adv_mutex.lock();
   cmd = ble_pending_cmd;
   if (cmd != 0) {
     memcpy(buf, ble_pending_name, sizeof(buf));
     buf[sizeof(buf) - 1] = '\0';
+    fp = ble_pending_fp;
+    sp = ble_pending_sp;
+    episode = ble_pending_episode;
     ble_pending_cmd = 0;
   }
   ble_adv_mutex.unlock();
   if (cmd != 0) {
-    applyBleLocalName(buf, cmd == 2);
+    applyBleLocalName(buf, cmd == 2, fp, sp, episode);
   }
 }
 
-static void queueBleFall(const String &payload) {
+static void queueBleFall(const String &payload, uint8_t fp, uint8_t sp, uint16_t episode) {
   ble_adv_mutex.lock();
   payload.toCharArray(ble_pending_name, sizeof(ble_pending_name));
+  ble_pending_fp = fp;
+  ble_pending_sp = sp;
+  ble_pending_episode = episode;
   ble_pending_cmd = 1;
   ble_adv_mutex.unlock();
 }
@@ -195,12 +222,15 @@ static void queueBleFall(const String &payload) {
 static void queueBleNeutral(const String &label) {
   ble_adv_mutex.lock();
   label.toCharArray(ble_pending_name, sizeof(ble_pending_name));
+  ble_pending_fp = 0;
+  ble_pending_sp = 100;
+  ble_pending_episode = 0;
   ble_pending_cmd = 2;
   ble_adv_mutex.unlock();
 }
 
 void advertiseNeutral(const String &label) {
-  applyBleLocalName(label.c_str(), true);
+  applyBleLocalName(label.c_str(), true, 0, 100, 0);
 }
 
 void killAdvertising(){
@@ -346,7 +376,9 @@ void run_inference_background()
                 {
                   String payload = String("Fall-") + worker + "-" + String(myCounter)
                       + "-F" + String(fallPct) + "-S" + String(standPct);
-                  queueBleFall(payload);
+                  uint8_t fp = (uint8_t)constrain(fallPct, 0, 100);
+                  uint8_t sp = (uint8_t)constrain(standPct, 0, 100);
+                  queueBleFall(payload, fp, sp, (uint16_t)myCounter);
                 }
                 lightsRedOn();
                 bleShowsFall = true;

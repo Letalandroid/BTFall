@@ -69,6 +69,11 @@ last_printed_name_by_address: dict[str, str] = {}
 last_skip_log_mono_by_address: dict[str, float] = {}
 SKIP_LOG_INTERVAL_SEC = 12.0
 
+# Debe coincidir con `worker` en fall1.ino (nombre sintético desde manufacturer data).
+BTFALL_WORKER = os.environ.get("BTFALL_WORKER", "Smith").strip() or "Smith"
+# 1 = imprimir ln vs device.name vs manufacturer_data por paquete
+BTFALL_DEBUG_BLE = os.environ.get("BTFALL_DEBUG_BLE", "").strip() in ("1", "true", "yes")
+
 os.system("clear")
 
 print(colored("Worker Fall Detection v0.2", "green"))
@@ -80,6 +85,10 @@ print("")
 print(colored(
     "Escaneo continuo: Fall-* = caída confirmada. OK-* en reposo = ignorado. "
     "Solo Fall→OK (misma MAC) = recuperación / aviso parcial + n8n.",
+    "cyan",
+))
+print(colored(
+    f"Nombre worker (MFG BTFall / debe coincidir con fall1.ino): {BTFALL_WORKER}",
     "cyan",
 ))
 print("Scanning...")
@@ -94,8 +103,30 @@ FALL_NAME_RE = re.compile(r"-F(\d+)-S(\d+)$")
 # Máx. caracteres del cuerpo HTTP al registrar errores (p. ej. 403 de Cloudflare/nginx/n8n).
 N8N_ERROR_BODY_MAX_CHARS = 4000
 
-# 1 = imprimir ln vs device.name por paquete (depurar Pi vs wearable)
-BTFALL_DEBUG_BLE = os.environ.get("BTFALL_DEBUG_BLE", "").strip() in ("1", "true", "yes")
+BTFALL_MFG_MAGIC = b"BT"
+
+
+def _name_from_btfall_mfg(advertisement_data) -> str | None:
+    """
+    Company 0xFFFF (Arduino): BT + state + ep(lo,hi) + fp + sp — alineado con Fall-<worker>-<ep>-Ffp-Ssp.
+    """
+    md = advertisement_data.manufacturer_data or {}
+    for _cid, blob in md.items():
+        if len(blob) >= 7 and blob[:2] == BTFALL_MFG_MAGIC:
+            state = blob[2]
+            ep = blob[3] | (blob[4] << 8)
+            fp, sp = blob[5], blob[6]
+            if state == 1:
+                return f"Fall-{BTFALL_WORKER}-{ep}-F{fp}-S{sp}"
+            return f"OK-{BTFALL_WORKER}"
+    return None
+
+
+def _resolve_ble_name(device, advertisement_data) -> str:
+    mfg_name = _name_from_btfall_mfg(advertisement_data)
+    if mfg_name:
+        return mfg_name
+    return _adv_visible_name(device, advertisement_data).strip()
 
 
 def _adv_visible_name(device, advertisement_data) -> str:
@@ -391,11 +422,12 @@ async def scan_loop() -> None:
     def detection_callback(device, advertisement_data) -> None:
         ln_raw = (advertisement_data.local_name or "").strip()
         dn_raw = (device.name or "").strip()
-        name = _adv_visible_name(device, advertisement_data).strip()
-        if BTFALL_DEBUG_BLE and (ln_raw or dn_raw or name):
+        mfg_raw = dict(advertisement_data.manufacturer_data or {})
+        name = _resolve_ble_name(device, advertisement_data)
+        if BTFALL_DEBUG_BLE and (ln_raw or dn_raw or mfg_raw or name):
             print(
                 colored(
-                    f"    [BLE dbg] ln={ln_raw!r} dn={dn_raw!r} → usado={name!r}",
+                    f"    [BLE dbg] mfg={mfg_raw!r} ln={ln_raw!r} dn={dn_raw!r} → usado={name!r}",
                     "yellow",
                 )
             )
