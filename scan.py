@@ -12,6 +12,7 @@
 
 import asyncio
 import os
+import re
 import time
 
 from bleak import BleakScanner
@@ -86,12 +87,25 @@ print(colored(
 print("Scanning...")
 print("")
 
+FALL_NAME_RE = re.compile(r"-F(\d+)-S(\d+)$")
+
+
+def _extract_scores(name: str) -> tuple[int | None, int | None]:
+    m = FALL_NAME_RE.search(name)
+    if not m:
+        return None, None
+    return int(m.group(1)), int(m.group(2))
+
 
 def _print_name_if_changed(address: str, name: str) -> None:
     if last_printed_name_by_address.get(address) == name:
         return
     last_printed_name_by_address[address] = name
-    print(colored(f"    {name}, {address}", "yellow"))
+    fall_pct, stand_pct = _extract_scores(name)
+    if fall_pct is not None and stand_pct is not None:
+        print(colored(f"    {name}, {address} (F:{fall_pct}% S:{stand_pct}%)", "yellow"))
+    else:
+        print(colored(f"    {name}, {address}", "yellow"))
 
 
 def _maybe_skip_log(address: str) -> None:
@@ -175,7 +189,12 @@ async def process_adv_packet(address: str, name: str, scan_cycle: int) -> int:
         if not new_event:
             _maybe_skip_log(address)
             return 1
-        await _register_detection_event(name, address, "Fall detected")
+        fall_pct, stand_pct = _extract_scores(name)
+        if fall_pct is not None and stand_pct is not None:
+            title = f"Fall detected (modelo: F={fall_pct}% S={stand_pct}%)"
+        else:
+            title = "Fall detected"
+        await _register_detection_event(name, address, title)
         return 1
 
     if name.startswith("OK-"):
