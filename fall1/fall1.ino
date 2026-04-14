@@ -7,6 +7,7 @@
 #include <fallBT_inferencing.h>
 #include <Arduino_BMI270_BMM150.h>
 #include <ArduinoBLE.h>
+#include <math.h>
 
 BLEService myService("fff0");
 BLEIntCharacteristic myCharacteristic("fff1", BLERead | BLEBroadcast);
@@ -26,6 +27,21 @@ int mySeconds=0;
 /* Constant defines -------------------------------------------------------- */
 #define CONVERT_G_TO_MS2    9.80665f
 #define MAX_ACCEPTED_RANGE  2.0f        // starting 03/2022, models are generated setting range to +-2, but this example use Arudino library which set range to +-4g. If you are using an older model, ignore this value and use 4.0f instead
+
+/* Heurística sobre el vector aceleración (m/s²) del último frame clasificado:
+ * complementa al modelo: pico/leve ingravidez o cambio de orientación vs. vertical. */
+#ifndef AXES_FALL_MAG_RATIO_HIGH
+#define AXES_FALL_MAG_RATIO_HIGH  1.62f  // |a| claramente > 1g (impacto / sacudida)
+#endif
+#ifndef AXES_FALL_MAG_RATIO_LOW
+#define AXES_FALL_MAG_RATIO_LOW   0.70f  // por debajo de 1g (posible caída / transición)
+#endif
+#ifndef AXES_FALL_TILT_DEG_MIN
+#define AXES_FALL_TILT_DEG_MIN    36.0f  // eje Z ya no domina = cuerpo / brazo muy inclinado
+#endif
+#ifndef FALL_PCT_BYPASS_AXES
+#define FALL_PCT_BYPASS_AXES      90     // si el modelo está muy seguro, no exigir ejes
+#endif
 
 
 
@@ -157,6 +173,31 @@ float ei_get_sign(float number) {
     return (number >= 0.0) ? 1.0 : -1.0;
 }
 
+/**
+ * Usa los últimos x,y,z (m/s²) del buffer de inferencia como factor extra.
+ * Devuelve true si la magnitud o la inclinación respecto a Z son coherentes con caída/impacto.
+ */
+bool axes_support_fall_decision(float ax, float ay, float az)
+{
+    const float g = CONVERT_G_TO_MS2;
+    float mag = sqrtf(ax * ax + ay * ay + az * az);
+    if (mag < 0.35f * g) {
+        return false;
+    }
+
+    float ratio = mag / g;
+    bool magnitude_event = (ratio >= AXES_FALL_MAG_RATIO_HIGH) || (ratio <= AXES_FALL_MAG_RATIO_LOW);
+
+    float zu = fabsf(az) / mag;
+    if (zu > 1.0f) {
+        zu = 1.0f;
+    }
+    float tilt_deg = acosf(zu) * (180.0f / 3.14159265f);
+    bool orientation_event = (tilt_deg >= AXES_FALL_TILT_DEG_MIN);
+
+    return magnitude_event || orientation_event;
+}
+
 
 void run_inference_background()
 {
@@ -228,13 +269,29 @@ void run_inference_background()
         }
       }
 
+        /* Último triplete = última muestra IMU usada en este frame (m/s²). */
+        float last_ax = inference_buffer[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE - 3];
+        float last_ay = inference_buffer[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE - 2];
+        float last_az = inference_buffer[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE - 1];
+        bool axes_ok = axes_support_fall_decision(last_ax, last_ay, last_az);
+        bool bypass_axes = (fallPct >= FALL_PCT_BYPASS_AXES);
+
         static bool bleShowsFall = false;
-        if (strcmp(prediction, "Fall") == 0) {
+        bool model_says_fall = (strcmp(prediction, "Fall") == 0);
+
+        if (model_says_fall) {
             if (!bleShowsFall) {
-                myCounter++;
-                advertiseFall(String("Fall-") + worker + "-" + String(myCounter), fallPct, standPct);
-                lightsRedOn();
-                bleShowsFall = true;
+                if (axes_ok || bypass_axes) {
+                    myCounter++;
+                    advertiseFall(String("Fall-") + worker + "-" + String(myCounter), fallPct, standPct);
+                    lightsRedOn();
+                    bleShowsFall = true;
+                } else if (debug_nn) {
+                    ei_printf(
+                        "Fall modelo pero ejes no confirman (ax,ay,az)=(%.2f,%.2f,%.2f) m/s² — ajustar umbral o esperar más muestras\n",
+                        (double)last_ax, (double)last_ay, (double)last_az
+                    );
+                }
             }
         } else {
             if (bleShowsFall) {

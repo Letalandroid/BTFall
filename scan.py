@@ -91,10 +91,45 @@ print("Scanning...")
 print("")
 
 N8N_WEBHOOK_URL = (
-    "https://n8n.federico-system-inventary.space/webhook-test/detectar-caidas"
+    "http://127.0.0.1:5678/webhook-test/detectar-caidas"
 )
+# Entre avisos n8n de la misma MAC para OK-* (caída parcial repetida). 0 = sin límite.
+WEBHOOK_OK_PARTIAL_COOLDOWN_SEC = 120.0
+
+last_n8n_ok_partial_mono_by_address: dict[str, float] = {}
 
 FALL_NAME_RE = re.compile(r"-F(\d+)-S(\d+)$")
+
+# Máx. caracteres del cuerpo HTTP al registrar errores (p. ej. 403 de Cloudflare/nginx/n8n).
+N8N_ERROR_BODY_MAX_CHARS = 4000
+
+
+def _print_n8n_http_error(exc: BaseException, label: str) -> None:
+    """Imprime el fallo completo: HTTPError incluye código, URL y cuerpo de respuesta."""
+    print(colored(f"    (error n8n webhook {label}: {exc!r})", "red"))
+    if isinstance(exc, urllib.error.HTTPError):
+        url = getattr(exc, "url", "") or "(url desconocida)"
+        print(colored(f"    HTTP {exc.code} {exc.reason} — URL: {url}", "red"))
+        for hdr in ("Content-Type", "WWW-Authenticate", "Server", "NEL", "cf-mitigated"):
+            if exc.headers and hdr in exc.headers:
+                print(colored(f"    {hdr}: {exc.headers[hdr]}", "red"))
+        try:
+            raw = exc.read()
+            body = raw.decode("utf-8", errors="replace").strip()
+        except Exception as read_err:  # noqa: BLE001 — queremos ver cualquier fallo al leer
+            print(colored(f"    (no se pudo leer el body: {read_err!r})", "red"))
+            return
+        if not body:
+            print(colored("    body: (vacío)", "red"))
+            return
+        if len(body) > N8N_ERROR_BODY_MAX_CHARS:
+            body = body[: N8N_ERROR_BODY_MAX_CHARS] + "…"
+        # Una línea por prefijo para que no se pierda en terminales estrechos
+        print(colored("    body completo:", "red"))
+        for line in body.splitlines():
+            print(colored(f"    | {line}", "red"))
+    elif isinstance(exc, urllib.error.URLError) and exc.reason is not None:
+        print(colored(f"    motivo: {exc.reason!r}", "red"))
 
 
 def _extract_scores(name: str) -> tuple[int | None, int | None]:
@@ -153,7 +188,46 @@ def send_n8n_fall_webhook(
             code = getattr(resp, "status", None) or resp.getcode()
             print(colored(f"    (n8n webhook OK: HTTP {code})", "green"))
     except urllib.error.URLError as exc:
-        print(colored(f"    (error n8n webhook: {exc})", "red"))
+        _print_n8n_http_error(exc, "fall")
+
+
+def send_n8n_ok_partial_webhook(name: str, address: str) -> None:
+    """Webhook para OK-<worker>: posible caída parcial / sin Fall suavizado en el wearable."""
+    payload = {
+        "event": "partial_fall_detected",
+        "source": "raspberry_pi_btfall",
+        "ts": int(time.time()),
+        "device": {
+            "name": name,
+            "address": address,
+            "fall_pct": None,
+            "stand_pct": None,
+        },
+        "details": {
+            "mensaje": (
+                "Alerta leve: el wearable informa estado OK sin caída confirmada "
+                "(señal compatible con movimiento brusco o recuperación). Conviene verificar."
+            ),
+            "tipo": "Alerta preventiva",
+            "causa_probable": "Patrón no clasificado como caída firme por el modelo en el dispositivo.",
+            "accion_sugerida": "Contactar al trabajador para confirmar que está bien.",
+            "url_revisada": "Panel de monitoreo BTFall (Raspberry)",
+        },
+    }
+
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    req = urllib.request.Request(
+        N8N_WEBHOOK_URL,
+        data=data,
+        headers={"Content-Type": "application/json; charset=utf-8"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            code = getattr(resp, "status", None) or resp.getcode()
+            print(colored(f"    (n8n webhook OK parcial: HTTP {code})", "green"))
+    except urllib.error.URLError as exc:
+        _print_n8n_http_error(exc, "parcial")
 
 
 def _print_name_if_changed(address: str, name: str) -> None:
@@ -215,8 +289,9 @@ async def _register_detection_event(name: str, address: str, title: str) -> None
 
     cursor.execute(sql)
     records = cursor.fetchall()
+    inserted = len(records) == 0
 
-    if len(records) == 0:
+    if inserted:
         print("Adding record: " + name)
         parts = name.split("-")
         worker = parts[1] if len(parts) >= 2 else "?"
@@ -229,7 +304,7 @@ async def _register_detection_event(name: str, address: str, title: str) -> None
         )
         with con:
             con.execute(sql_ins)
-        # Webhook n8n solo en caídas confirmadas por nombre Fall-* (no en OK- parcial).
+        # Fall-*: petición n8n antes de la pausa (mismo orden que antes).
         if name.startswith("Fall"):
             f_pct, s_pct = _extract_scores(name)
             await asyncio.to_thread(
@@ -242,6 +317,22 @@ async def _register_detection_event(name: str, address: str, title: str) -> None
         await asyncio.sleep(5)
     else:
         print(colored("This fall was already in the database", "green"))
+
+    # OK-*: caída parcial; la fila suele repetirse (mismo nombre) → avisar igual con cooldown.
+    if name.startswith("OK-"):
+        now = time.monotonic()
+        if WEBHOOK_OK_PARTIAL_COOLDOWN_SEC <= 0:
+            allow = True
+        else:
+            prev = last_n8n_ok_partial_mono_by_address.get(address, 0.0)
+            allow = (now - prev) >= WEBHOOK_OK_PARTIAL_COOLDOWN_SEC
+        if allow:
+            last_n8n_ok_partial_mono_by_address[address] = now
+            await asyncio.to_thread(
+                send_n8n_ok_partial_webhook,
+                name,
+                address,
+            )
 
 
 async def process_adv_packet(address: str, name: str, scan_cycle: int) -> int:
