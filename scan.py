@@ -41,8 +41,23 @@ def record_fall_event(name: str, address: str) -> dict:
         "mensaje": "Registro solo en fall.db (instrumento de estudio no cargado).",
     }
 
+
+def init_fall_db() -> None:
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS FALL (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            worker TEXT
+        )
+        """
+    )
+    con.commit()
+
+
 con = sl.connect("fall.db")
 cursor = con.cursor()
+init_fall_db()
 
 iterations = 0
 # Último nombre BLE visto por MAC.
