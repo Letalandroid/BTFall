@@ -35,6 +35,7 @@ static uint32_t run_inference_every_ms = 2000;
 static rtos::Thread inference_thread(osPriorityLow);
 static float buffer[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE] = { 0 };
 static float inference_buffer[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE];
+static volatile uint32_t missed_samples = 0;
 
 /* Forward declaration */
 void run_inference_background();
@@ -253,15 +254,36 @@ void loop()
         // Determine the next tick (and then sleep later)
         uint64_t next_tick = micros() + (EI_CLASSIFIER_INTERVAL_MS * 1000);
 
+        float ax = 0.0f;
+        float ay = 0.0f;
+        float az = 0.0f;
+        bool has_new_sample = false;
+
+        if (IMU.accelerationAvailable()) {
+            has_new_sample = IMU.readAcceleration(ax, ay, az);
+        }
+
+        if (!has_new_sample) {
+            missed_samples++;
+            if ((missed_samples % 50) == 0) {
+                ei_printf("WARN: IMU sin muestra nueva (x%lu)\n", (unsigned long)missed_samples);
+            }
+            uint64_t now_us = micros();
+            if (next_tick > now_us) {
+                uint64_t time_to_wait = next_tick - now_us;
+                delay((int)floor((float)time_to_wait / 1000.0f));
+                delayMicroseconds(time_to_wait % 1000);
+            }
+            continue;
+        }
+        missed_samples = 0;
+
         // roll the buffer -3 points so we can overwrite the last one
         numpy::roll(buffer, EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE, -3);
 
-        // read to the end of the buffer
-        IMU.readAcceleration(
-            buffer[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE - 3],
-            buffer[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE - 2],
-            buffer[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE - 1]
-        );
+        buffer[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE - 3] = ax;
+        buffer[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE - 2] = ay;
+        buffer[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE - 1] = az;
 
         for (int i = 0; i < 3; i++) {
             if (fabs(buffer[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE - 3 + i]) > MAX_ACCEPTED_RANGE) {
@@ -274,8 +296,11 @@ void loop()
         buffer[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE - 1] *= CONVERT_G_TO_MS2;
 
         // and wait for next tick
-        uint64_t time_to_wait = next_tick - micros();
-        delay((int)floor((float)time_to_wait / 1000.0f));
-        delayMicroseconds(time_to_wait % 1000);
+        uint64_t now_us = micros();
+        if (next_tick > now_us) {
+            uint64_t time_to_wait = next_tick - now_us;
+            delay((int)floor((float)time_to_wait / 1000.0f));
+            delayMicroseconds(time_to_wait % 1000);
+        }
     }
 }
