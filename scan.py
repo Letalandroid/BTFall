@@ -18,13 +18,28 @@ from bleak import BleakScanner
 from termcolor import colored
 import sqlite3 as sl
 
-from instrumento_recoleccion import (
-    FICHAS,
-    ficha_counts,
-    init_instrumento_db,
-    record_fall_event,
-    status_report,
-)
+# El módulo `instrumento_recoleccion` ya no está en el repo (commit de limpieza).
+# Stubs mínimos para que el escáner BLE y SQLite sigan funcionando.
+FICHAS: tuple[str, ...] = ()
+
+
+def init_instrumento_db() -> None:
+    pass
+
+
+def status_report() -> str:
+    return "Instrumento de recolección: no disponible (solo BLE + fall.db)."
+
+
+def ficha_counts() -> dict[str, int]:
+    return {}
+
+
+def record_fall_event(name: str, address: str) -> dict:
+    return {
+        "ok": False,
+        "mensaje": "Registro solo en fall.db (instrumento de estudio no cargado).",
+    }
 
 con = sl.connect("fall.db")
 cursor = con.cursor()
