@@ -42,6 +42,9 @@ int mySeconds=0;
 #ifndef FALL_PCT_BYPASS_AXES
 #define FALL_PCT_BYPASS_AXES      90     // si el modelo está muy seguro, no exigir ejes
 #endif
+#ifndef FALL_PCT_TRIGGER
+#define FALL_PCT_TRIGGER          60     // regla solicitada: >=60% Fall ya cuenta como caída
+#endif
 
 /* Giroscopio (readGyroscope: rad/s en Nano 33 BLE Rev2): rotación brusca suele acompañar caída/torsión. */
 #ifndef GYRO_MAG_RAD_S_MIN
@@ -308,7 +311,7 @@ void run_inference_background()
 #endif
 
         static bool bleShowsFall = false;
-        bool model_says_fall = (strcmp(prediction, "Fall") == 0);
+        bool model_says_fall = (strcmp(prediction, "Fall") == 0) || (fallPct >= FALL_PCT_TRIGGER);
 
         if (model_says_fall) {
             if (!bleShowsFall) {
