@@ -46,7 +46,11 @@ int mySeconds=0;
 #define FALL_PCT_TRIGGER          60     // entrar en alarma Fall si Fall% >= esto (raw)
 #endif
 #ifndef FALL_PCT_RELEASE
-#define FALL_PCT_RELEASE          42     // salir a OK solo si Fall% cae por debajo (histéresis; evita parpadeo)
+#define FALL_PCT_RELEASE          42     // debajo de esto cuenta como “zona baja” para poder salir
+#endif
+/* No volver a OK por un solo frame ruidoso (p. ej. Fall 80% → 6% → 63%): la Pi no alcanza a ver Fall-*. */
+#ifndef FALL_RELEASE_CONSEC_FRAMES
+#define FALL_RELEASE_CONSEC_FRAMES 4    // tantos ciclos seguidos con Fall% < RELEASE (×2 s ≈ 8 s máx.)
 #endif
 
 /* Giroscopio (readGyroscope: rad/s en Nano 33 BLE Rev2): rotación brusca suele acompañar caída/torsión. */
@@ -315,11 +319,12 @@ void run_inference_background()
 #endif
 
         static bool bleShowsFall = false;
+        static uint8_t fall_release_streak = 0;
         bool enter_fall = (strcmp(prediction, "Fall") == 0) || (fallPct >= FALL_PCT_TRIGGER);
-        /* Mientras la alarma está activa, no volver a OK por un solo frame con Fall% <60% (histéresis). */
-        bool leave_fall = (fallPct < FALL_PCT_RELEASE);
+        bool in_low_fall_band = (fallPct < FALL_PCT_RELEASE);
 
         if (!bleShowsFall) {
+            fall_release_streak = 0;
             if (enter_fall && (axes_ok || bypass_axes)) {
                 myCounter++;
                 advertiseFall(String("Fall-") + worker + "-" + String(myCounter), fallPct, standPct);
@@ -331,10 +336,18 @@ void run_inference_background()
                     (double)last_ax, (double)last_ay, (double)last_az,
                     (double)gx_snap, (double)gy_snap, (double)gz_snap, gyro_snap ? 1 : 0);
             }
-        } else if (leave_fall) {
-            advertiseNeutral(String("OK-") + worker);
-            lightsRedOff();
-            bleShowsFall = false;
+        } else {
+            if (in_low_fall_band) {
+                fall_release_streak++;
+                if (fall_release_streak >= FALL_RELEASE_CONSEC_FRAMES) {
+                    advertiseNeutral(String("OK-") + worker);
+                    lightsRedOff();
+                    bleShowsFall = false;
+                    fall_release_streak = 0;
+                }
+            } else {
+                fall_release_streak = 0;
+            }
         }
 
         delay(run_inference_every_ms);
