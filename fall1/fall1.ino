@@ -35,6 +35,8 @@ static uint32_t run_inference_every_ms = 2000;
 static rtos::Thread inference_thread(osPriorityLow);
 static float buffer[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE] = { 0 };
 static float inference_buffer[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE];
+static volatile uint32_t last_sample_ms = 0;
+static volatile uint32_t missed_samples = 0;
 
 /* Forward declaration */
 void run_inference_background();
@@ -117,17 +119,19 @@ void lightsRedOff(){
   digitalWrite(GREEN, HIGH); 
 }
 
-void advertiseFall(String fallCode){
+void advertiseFall(String fallCode, int fallPct, int standPct){
   
   Serial.println("Publicando ...");
 
   char charBuf[50];
-  fallCode.toCharArray(charBuf, 50);
+  String payload = fallCode + "-F" + String(fallPct) + "-S" + String(standPct);
+  payload.toCharArray(charBuf, 50);
   
   scanData.setLocalName(charBuf);  
   BLE.setScanResponseData(scanData);  
   // Nombre también en GAP (no solo scan response) para que los centrales vean Fall-* al instante.
   BLE.setLocalName(charBuf);
+  myCharacteristic.writeValue(fallPct);
   BLE.advertise();
 
 }
@@ -167,6 +171,13 @@ void run_inference_background()
     ei_classifier_smooth_init(&smooth, 10 /* no. of readings */, 7 /* min. readings the same */, 0.8 /* min. confidence */, 0.3 /* max anomaly */);
 
     while (1) {
+        uint32_t age_ms = millis() - last_sample_ms;
+        if (last_sample_ms == 0 || age_ms > 1500) {
+            // Si no hay datos frescos, evitamos inferir sobre buffer envejecido.
+            delay(100);
+            continue;
+        }
+
         // copy the buffer
         memcpy(inference_buffer, buffer, EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE * sizeof(float));
 
@@ -217,10 +228,20 @@ void run_inference_background()
       }
 
         static bool bleShowsFall = false;
+        int fallPct = 0;
+        int standPct = 0;
+        for (size_t ix = 0; ix < EI_CLASSIFIER_LABEL_COUNT; ix++) {
+            if (strcmp(result.classification[ix].label, "Fall") == 0) {
+                fallPct = (int)roundf(result.classification[ix].value * 100.0f);
+            } else if (strcmp(result.classification[ix].label, "Stand") == 0) {
+                standPct = (int)roundf(result.classification[ix].value * 100.0f);
+            }
+        }
+
         if (strcmp(prediction, "Fall") == 0) {
             if (!bleShowsFall) {
                 myCounter++;
-                advertiseFall(String("Fall-") + worker + "-" + String(myCounter));
+                advertiseFall(String("Fall-") + worker + "-" + String(myCounter), fallPct, standPct);
                 lightsRedOn();
                 bleShowsFall = true;
             }
@@ -263,7 +284,10 @@ void loop()
         }
 
         if (!has_new_sample) {
-            ei_printf("WARN: IMU sin muestra nueva\n");
+            missed_samples++;
+            if ((missed_samples % 50) == 0) {
+                ei_printf("WARN: IMU sin muestra nueva (x%lu)\n", (unsigned long)missed_samples);
+            }
             uint64_t now_us = micros();
             if (next_tick > now_us) {
                 uint64_t time_to_wait = next_tick - now_us;
@@ -272,6 +296,8 @@ void loop()
             }
             continue;
         }
+        missed_samples = 0;
+        last_sample_ms = millis();
 
         // roll the buffer -3 points so we can overwrite the last one
         numpy::roll(buffer, EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE, -3);
