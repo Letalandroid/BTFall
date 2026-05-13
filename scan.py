@@ -288,7 +288,11 @@ def _maybe_skip_log(address: str) -> None:
     print(colored(msg, "cyan"))
 
 
-async def _register_detection_event(name: str, address: str, title: str) -> None:
+async def _register_detection_event(name: str, address: str, title: str) -> bool:
+    """
+    Devuelve True si el instrumento de validación pide detener el escaneo
+    (máximo de personas en la fila actual).
+    """
     print(colored(title, "red"))
 
     inst: dict
@@ -307,11 +311,13 @@ async def _register_detection_event(name: str, address: str, title: str) -> None
             for k in metric_keys
             if k in inst and inst[k] is not None
         )
+        max_p = inst.get("max_personas_fila")
+        suf_max = f"/{max_p}" if max_p is not None else ""
         print(
             colored(
                 "    Instrumento: "
-                f"{inst.get('ficha_etiqueta', '')} — fila {inst['n_en_instrumento']}/10 — "
-                f"N° persona {inst['n_persona']}"
+                f"{inst.get('ficha_etiqueta', '')} — fila n={inst['n_en_instrumento']} — "
+                f"persona {inst['n_persona']}{suf_max}"
                 + (f" — {detalles}" if detalles else ""),
                 "magenta",
             )
@@ -325,6 +331,9 @@ async def _register_detection_event(name: str, address: str, title: str) -> None
         )
     else:
         print(colored("    " + inst["mensaje"], "yellow"))
+
+    if inst.get("mensaje_fin"):
+        print(colored("    " + str(inst["mensaje_fin"]), "green"))
 
     sql = "SELECT * from FALL WHERE name='" + name + "'"
     print(sql)
@@ -370,10 +379,14 @@ async def _register_detection_event(name: str, address: str, title: str) -> None
     if inserted:
         await asyncio.sleep(5)
 
+    return bool(inst.get("stop_scan"))
+
 
 async def process_adv_packet(address: str, name: str) -> int:
     """
-    Devuelve 1 si en este paquete hubo un evento registrable (Fall u OK parcial).
+    Devuelve 1 si hubo un evento registrable (Fall u OK parcial),
+    2 si el instrumento de validación pidió detener el escaneo (límite de personas en la fila),
+    0 en caso contrario.
     """
     last_heard_mono_by_address[address] = time.monotonic()
     _print_name_if_changed(address, name)
@@ -390,7 +403,8 @@ async def process_adv_packet(address: str, name: str) -> int:
             title = f"Fall detected (modelo: F={fall_pct}% S={stand_pct}%)"
         else:
             title = "Fall detected"
-        await _register_detection_event(name, address, title)
+        if await _register_detection_event(name, address, title):
+            return 2
         return 1
 
     if name.startswith("OK-"):
@@ -401,11 +415,12 @@ async def process_adv_packet(address: str, name: str) -> int:
             prev_ep = parse_fall_ble_name(prev)
             if prev_ep is not None:
                 clear_episode_timer(address, prev_ep["episode"])
-            await _register_detection_event(
+            if await _register_detection_event(
                 name,
                 address,
                 "Recuperación / posible caída parcial (transición Fall→OK en el wearable)",
-            )
+            ):
+                return 2
             return 1
         return 0
 
@@ -466,6 +481,14 @@ async def scan_loop() -> None:
                     continue
                 heard_this.add(addr)
                 hit = await process_adv_packet(addr, pkt_name)
+                if hit == 2:
+                    print(
+                        colored(
+                            "Instrumento: límite de personas en la fila alcanzado; fin del escaneo.",
+                            "green",
+                        )
+                    )
+                    return
                 found = max(found, hit)
 
             if found == 0:
