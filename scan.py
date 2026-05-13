@@ -21,28 +21,16 @@ from bleak import BleakScanner
 from termcolor import colored
 import sqlite3 as sl
 
-# El módulo `instrumento_recoleccion` ya no está en el repo (commit de limpieza).
-# Stubs mínimos para que el escáner BLE y SQLite sigan funcionando.
-FICHAS: tuple[str, ...] = ()
-
-
-def init_instrumento_db() -> None:
-    pass
-
-
-def status_report() -> str:
-    return "Instrumento de recolección: no disponible (solo BLE + fall.db)."
-
-
-def ficha_counts() -> dict[str, int]:
-    return {}
-
-
-def record_fall_event(name: str, address: str) -> dict:
-    return {
-        "ok": False,
-        "mensaje": "Registro solo en fall.db (instrumento de estudio no cargado).",
-    }
+from instrumento_validacion import (
+    FICHAS,
+    clear_episode_timer,
+    ficha_counts,
+    init_instrumento_db,
+    parse_fall_ble_name,
+    prompt_ficha_y_persona,
+    record_fall_event,
+    status_report,
+)
 
 
 def init_fall_db() -> None:
@@ -84,6 +72,7 @@ print(colored("Worker Fall Detection v0.2", "green"))
 print("Roni Bandini - Argentina - Powered by Edge Impulse")
 print("")
 init_instrumento_db()
+prompt_ficha_y_persona()
 print(colored(status_report(), "cyan"))
 print("")
 print(colored(
@@ -302,7 +291,11 @@ def _maybe_skip_log(address: str) -> None:
 async def _register_detection_event(name: str, address: str, title: str) -> None:
     print(colored(title, "red"))
 
-    inst = record_fall_event(name, address)
+    inst: dict
+    if name.startswith("Fall"):
+        inst = record_fall_event(name, address)
+    else:
+        inst = {"ok": False, "mensaje": "(Instrumento: solo se escribe en caídas Fall-*)"}
     if inst.get("ok"):
         counts = ficha_counts()
         metric_keys = (
@@ -405,6 +398,9 @@ async def process_adv_packet(address: str, name: str) -> int:
         last_seen_name_by_address[address] = name
         # OK-* solo anuncia “neutral” en el Arduino; no es caída mientras no venga tras Fall-*.
         if prev is not None and ("Fall" in prev):
+            prev_ep = parse_fall_ble_name(prev)
+            if prev_ep is not None:
+                clear_episode_timer(address, prev_ep["episode"])
             await _register_detection_event(
                 name,
                 address,
