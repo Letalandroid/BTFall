@@ -187,7 +187,7 @@ def send_n8n_fall_webhook(
     """Envía JSON a n8n para WhatsApp / automatización (texto breve; % solo en device)."""
     mensaje = (
         "Posible caída detectada. "
-        "Contacta al trabajador y comprueba que esté bien cuanto antes."
+        "Contacta a la persona y comprueba que esté bien cuanto antes."
     )
 
     payload = {
@@ -236,7 +236,7 @@ def send_n8n_ok_partial_webhook(name: str, address: str) -> None:
         "details": {
             "mensaje": (
                 "La alerta de caída dejó de mostrarse. "
-                "Confirma con el trabajador que se encuentra bien."
+                "Confirma con la persona que se encuentra bien."
             ),
             "url_revisada": "Panel de monitoreo BTFall (Raspberry)",
         },
